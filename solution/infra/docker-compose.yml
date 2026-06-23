@@ -1,0 +1,39 @@
+name: cstats
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cstats
+      POSTGRES_USER: cstats
+      POSTGRES_PASSWORD: cstats_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cstats -d cstats"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  telegram-bot:
+    build:
+      context: ../services/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../services/api/.env
+    environment:
+      DATABASE_URL: postgres://cstats:cstats_dev_password@postgres:5432/cstats
+      IMAGE_STORAGE_ROOT: /data/images
+    volumes:
+      - telegram-images:/data/images
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  telegram-images:
