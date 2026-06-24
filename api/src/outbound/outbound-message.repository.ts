@@ -4,6 +4,7 @@ const { Pool } = pg;
 
 export type ClaimedOutboundMessage = {
   id: number;
+  traceId?: string;
   platform: 'telegram';
   externalChannelId: string;
   text: string;
@@ -28,6 +29,7 @@ export class PostgresOutboundMessageRepository implements OutboundMessageReposit
         WITH next_message AS (
           SELECT
             id,
+            trace_id AS "traceId",
             platform,
             external_channel_id AS "externalChannelId",
             text
@@ -55,6 +57,7 @@ export class PostgresOutboundMessageRepository implements OutboundMessageReposit
         WHERE outbound_messages.id = next_message.id
         RETURNING
           outbound_messages.id,
+          next_message."traceId",
           next_message.platform,
           next_message."externalChannelId",
           next_message.text

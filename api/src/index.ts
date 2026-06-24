@@ -6,6 +6,7 @@ import { TelegramUpdateHandler } from './channels/telegram/telegram-update-handl
 import { PostgresIngestionRepository } from './db/postgres-ingestion.repository.js';
 import { IngestionService } from './ingestion/ingestion.service.js';
 import { renderIngestionResult } from './ingestion/ingestion-response-renderer.js';
+import { logInfo } from './logger.js';
 import { OutboundMessageDispatcher } from './outbound/outbound-message-dispatcher.js';
 import { PostgresOutboundMessageRepository } from './outbound/outbound-message.repository.js';
 import { DiskImageStorage } from './storage/disk-image-storage.js';
@@ -24,7 +25,20 @@ const updateHandler = new TelegramUpdateHandler({
   config,
   commandRouter,
   imageMessageHandler: async (message, files) => {
-    return renderIngestionResult(await ingestionService.ingestImageMessage(message, files));
+    const result = await ingestionService.ingestImageMessage(message, files);
+
+    logInfo('telegram_message_put_in_db', {
+      trace_id: message.externalMessageId,
+      chat_id: message.externalChannelId,
+      source_message_id: result.database?.sourceMessageId,
+      source_message_inserted: result.database?.sourceMessageInserted,
+      image_count: result.images.length,
+      queued_job_count: result.database?.images.filter((image) => image.extractionJobId).length ?? 0,
+      duplicate_image_count: result.database?.images.filter((image) => !image.imageAssetInserted).length ?? 0,
+      database_enabled: Boolean(result.database)
+    });
+
+    return renderIngestionResult(result);
   }
 });
 const bot = new TelegramBot(config, updateHandler);

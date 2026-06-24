@@ -1,4 +1,5 @@
 import type { TelegramApi } from '../channels/telegram/telegram-api.js';
+import { logError, logInfo } from '../logger.js';
 import type { OutboundMessageRepository } from './outbound-message.repository.js';
 
 export type OutboundDispatcherConfig = {
@@ -51,10 +52,18 @@ export class OutboundMessageDispatcher {
 
       await this.telegram.sendMessage(message.externalChannelId, message.text);
       await this.messages.markSent(message.id);
-      console.log(`Sent outbound message ${message.id}`);
+      logInfo('telegram_outbound_sent', {
+        trace_id: message.traceId ?? `outbound-${message.id}`,
+        outbound_message_id: message.id,
+        chat_id: message.externalChannelId
+      });
     } catch (error) {
       await this.messages.markFailed(message.id, error);
-      console.error(`Failed outbound message ${message.id}`, error);
+      logError('telegram_outbound_failed', {
+        trace_id: message.traceId ?? `outbound-${message.id}`,
+        outbound_message_id: message.id,
+        chat_id: message.externalChannelId
+      }, error);
     }
 
     return true;

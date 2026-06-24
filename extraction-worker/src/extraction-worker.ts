@@ -2,6 +2,7 @@ import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { WorkerConfig } from './config.js';
 import type { ClaimedExtractionJob, ExtractionJobRepository } from './extraction-job.repository.js';
+import { logError, logInfo } from './logger.js';
 import {
   extractMatchStats,
   renderProcessingError,
@@ -41,21 +42,30 @@ export class ExtractionWorker {
       return false;
     }
 
+    const logFields = {
+      trace_id: job.externalMessageId,
+      extraction_job_id: job.id,
+      image_asset_id: job.imageAssetId
+    };
+    logInfo('extractor_in_process', logFields);
+
     try {
       const stats = await this.process(job);
       await this.jobs.complete(job.id, {
+        traceId: job.externalMessageId,
         platform: job.sourcePlatform,
         externalChannelId: job.externalChannelId,
         text: renderStatsNotification(job, stats)
       });
-      console.log(`Completed extraction job ${job.id}`);
+      logInfo('telegram_outbound_ready', { ...logFields, status: 'completed' });
     } catch (error) {
       await this.jobs.fail(job.id, error, {
+        traceId: job.externalMessageId,
         platform: job.sourcePlatform,
         externalChannelId: job.externalChannelId,
         text: renderProcessingError(job, error)
       });
-      console.error(`Failed extraction job ${job.id}`, error);
+      logError('telegram_outbound_ready', { ...logFields, status: 'failed' }, error);
     }
 
     return true;
