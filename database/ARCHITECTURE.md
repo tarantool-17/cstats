@@ -54,6 +54,11 @@ Use PostgreSQL as the async job queue.
 
 Workers claim jobs with row locking. Failed jobs can be retried with backoff.
 
+## Migration Application
+
+Local Docker Compose runs a short-lived `migrate` service after PostgreSQL becomes healthy.
+The service applies SQL files from `database/migrations` before the API and extraction worker start.
+
 ## Idempotency Constraints
 
 Transport idempotency:

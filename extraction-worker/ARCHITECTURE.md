@@ -29,6 +29,19 @@ It should be lightweight, portable, and runnable as a Docker container or regula
 7. Store raw OCR, normalized payload, bounding boxes, confidence, parser version, and review questions.
 8. Mark the job completed, failed, duplicate candidate, or pending review.
 
+## First Worker Skeleton
+
+The first implementation proves queue mechanics before OCR exists:
+
+1. Claim one `queued` job at a time using `FOR UPDATE SKIP LOCKED`.
+2. Mark the job `processing`, increment `attempt_count`, and record `locked_by`.
+3. Resolve `image_assets.relative_path` under `IMAGE_STORAGE_ROOT`.
+4. Confirm the image file exists.
+5. Mark the job `completed` when the file is present.
+6. Mark the job `failed` and store `last_error` when processing throws.
+
+This skeleton intentionally does not parse scoreboards yet. OCR and extraction-result persistence can replace the file-existence stub without changing the queue claiming contract.
+
 ## Parser Input Reality
 
 The first images are Telegram JPEG photos of a monitor, not clean screenshots. The worker must handle:
