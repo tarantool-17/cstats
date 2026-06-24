@@ -1,4 +1,4 @@
-import type { ClaimedExtractionJob } from './extraction-job.repository.js';
+import type { ClaimedExtractionJob, ScoreboardPersistenceResult } from './extraction-job.repository.js';
 
 export type ScoreboardTeam = 'CT' | 'T' | 'unknown';
 
@@ -14,6 +14,7 @@ export type ScoreboardPlayer = {
 
 export type ScoreboardExtraction = {
   mapName: string | null;
+  mapKey?: string | null;
   ctScore: number | null;
   tScore: number | null;
   players: ScoreboardPlayer[];
@@ -65,7 +66,28 @@ export function extractScoreboardStub(job: ClaimedExtractionJob): ScoreboardExtr
   };
 }
 
-export function renderScoreboardNotification(job: ClaimedExtractionJob, extraction: ScoreboardExtraction): string {
+export function renderScoreboardNotification(
+  job: ClaimedExtractionJob,
+  extraction: ScoreboardExtraction,
+  result?: ScoreboardPersistenceResult
+): string {
+  if (result?.idempotency.skipStats) {
+    const header = [
+      'Scoreboard already tracked',
+      `Message: ${job.externalMessageId}`,
+      `Map: ${extraction.mapName ?? 'unknown'}`,
+      `Score: CT ${formatValue(extraction.ctScore)} - T ${formatValue(extraction.tScore)}`,
+      `Duplicate of extraction: #${formatValue(result.idempotency.duplicateOfMatchExtractionId)}`,
+      `Match score: ${result.idempotency.duplicateMatchScore}%`,
+      `Reason: ${result.idempotency.duplicateReason ?? result.idempotency.duplicateMatchType}`,
+      'Action: saved this extraction as duplicate evidence and skipped stats insert',
+      `Job: #${job.id}`
+    ];
+    const warnings = extraction.warnings.map((warning) => `Warning: ${warning}`);
+
+    return [...header, ...warnings].join('\n');
+  }
+
   const header = [
     extraction.warnings.length > 0 ? 'Scoreboard extracted with warnings' : 'Scoreboard extracted',
     `Message: ${job.externalMessageId}`,

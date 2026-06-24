@@ -30,7 +30,8 @@ The command router should return structured results instead of Telegram-formatte
 - `/stats <nickname>`
 - `/lastmatch`
 - `/pending`
-- `/merge <alias> <player>`
+- `/player <display-name> [primary-alias]`
+- `/alias <new-alias> <existing-alias>`
 
 ## Rules
 
@@ -38,3 +39,14 @@ The command router should return structured results instead of Telegram-formatte
 - Admin commands must check configured admin identities.
 - Commands should log enough context for audit and debugging.
 - Commands should not trigger OCR work directly.
+
+## Alias Command
+
+`/player <display-name> [primary-alias]` is an admin command for creating a
+canonical player plus their first confirmed alias in one transaction. When
+`primary-alias` is omitted, the display name is used as the primary alias.
+
+`/alias <new-alias> <existing-alias>` is an admin command for linking OCR variants
+or changed nicknames to an existing canonical player. The existing alias must
+already be confirmed. The command inserts a new confirmed alias for the same
+player, and database triggers retroactively resolve matching unresolved stat rows.

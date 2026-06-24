@@ -26,7 +26,7 @@ It should be lightweight, portable, and runnable as a Docker container or regula
 4. Crop and perspective-correct the panel when possible.
 5. OCR the relevant regions.
 6. Parse map, team scores, player nicknames, and stat columns.
-7. Store raw OCR, normalized payload, bounding boxes, confidence, parser version, and review questions.
+7. Store normalized match fields, raw nickname evidence, and per-player stat columns in PostgreSQL.
 8. Mark the job completed, failed, duplicate candidate, or pending review.
 
 ## First Worker Skeleton
@@ -85,6 +85,8 @@ review_questions:
 ```
 
 The worker should preserve raw nicknames exactly. Identity resolution happens in the API service.
+The first persistence pass only links a row to a canonical player when the raw nickname
+matches a confirmed alias after normalization.
 
 ## Confidence Rules
 

@@ -75,6 +75,48 @@ Workers claim jobs with row locking. Failed jobs can be retried with backoff.
 
 The API service dispatches queued outbound messages so workers stay free of Telegram or Discord dependencies.
 
+## Extraction Results
+
+`match_extractions` stores one normalized scoreboard extraction per image job:
+
+- `extraction_job_id`
+- `image_asset_id`
+- `map_name`
+- `ct_score`
+- `t_score`
+- `confidence`
+- `warnings`
+
+`match_extraction_players` stores the extracted scoreboard rows column by column:
+
+- `match_extraction_id`
+- `row_number`
+- `team`
+- `raw_nickname`
+- `kills`
+- `deaths`
+- `assists`
+- `adr_or_kast`
+- `damage`
+
+The worker writes extraction rows and marks the job completed in the same transaction.
+If any row cannot be saved, the job remains incomplete and can be retried.
+
+## Player Identity
+
+Nicknames extracted from screenshots are evidence, not identity. `players` stores the
+canonical person, while `player_aliases` stores confirmed, suggested, or rejected
+nickname spellings for that person.
+
+`match_player_stats` copies the extracted stat columns into the calculation-ready
+table and links each row to `players.id` when the normalized nickname has exactly
+one confirmed alias. Unmatched or ambiguous names stay unresolved with
+`player_id = NULL` until an alias is confirmed.
+
+When a confirmed alias is added or updated, PostgreSQL refreshes matching
+unresolved stat rows automatically. This lets nickname changes and historical OCR
+variants resolve without rewriting the raw extraction evidence.
+
 ## Migration Application
 
 Local Docker Compose runs a short-lived `migrate` service after PostgreSQL becomes healthy.

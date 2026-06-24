@@ -57,12 +57,16 @@ export class ExtractionWorker {
 
     try {
       const extraction = await this.process(job);
-      await this.jobs.complete(job.id, {
-        traceId: job.externalMessageId,
-        platform: job.sourcePlatform,
-        externalChannelId: job.externalChannelId,
-        text: renderScoreboardNotification(job, extraction)
-      });
+      await this.jobs.complete(
+        job,
+        extraction,
+        (result) => ({
+          traceId: job.externalMessageId,
+          platform: job.sourcePlatform,
+          externalChannelId: job.externalChannelId,
+          text: renderScoreboardNotification(job, result.extraction, result)
+        })
+      );
       logInfo('telegram_outbound_ready', { ...logFields, status: 'completed' });
     } catch (error) {
       await this.jobs.fail(job.id, error, {
