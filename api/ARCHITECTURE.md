@@ -15,6 +15,7 @@ It owns workflow and integration. It should not perform OCR-heavy parsing direct
 - source-message idempotency
 - extraction job creation
 - same-channel review prompt delivery
+- queued outbound message dispatch
 - admin action handling
 - player identity resolution workflow
 - match commit workflow
@@ -41,6 +42,7 @@ api/
     ingestion/
     storage/
     review/
+    outbound/
     identity/
     matches/
     commands/
@@ -70,6 +72,7 @@ The API service should not:
 3. Accept Telegram photo messages from allowed chats only.
 4. Persist source messages, downloaded image files, image metadata, and extraction jobs.
 5. Reply in-channel when an image is accepted, duplicated, rejected, or queued.
-6. Render pending review tasks with inline admin buttons.
-7. Enforce admin checks on callback actions.
-8. Add `/top10` and `/stats <nickname>` once committed-match read models exist.
+6. Dispatch worker result or processing-error messages back to the source channel.
+7. Render pending review tasks with inline admin buttons.
+8. Enforce admin checks on callback actions.
+9. Add `/top10` and `/stats <nickname>` once committed-match read models exist.

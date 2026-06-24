@@ -46,6 +46,7 @@ The API service owns all chat-facing behavior:
 - image ingestion
 - local-disk image persistence
 - command handling
+- queued outbound message dispatch
 - same-channel admin review prompts
 - match commit workflow after identity resolution
 
@@ -88,6 +89,8 @@ flowchart LR
     JOBS --> WORKER["Extraction Worker"]
     WORKER --> DISK
     WORKER --> DB
+    DB --> OUTBOUND["Outbound Messages"]
+    OUTBOUND --> API
     DB --> REVIEW["Review Tasks"]
     REVIEW --> API
     API --> TG

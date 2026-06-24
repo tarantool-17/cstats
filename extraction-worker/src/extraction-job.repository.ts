@@ -6,6 +6,15 @@ export type ClaimedExtractionJob = {
   id: number;
   imageAssetId: number;
   relativePath: string;
+  sourcePlatform: 'telegram';
+  externalChannelId: string;
+  externalMessageId: string;
+};
+
+export type OutboundNotification = {
+  platform: 'telegram';
+  externalChannelId: string;
+  text: string;
 };
 
 export class ExtractionJobRepository {
@@ -22,11 +31,20 @@ export class ExtractionJobRepository {
           SELECT
             extraction_jobs.id,
             extraction_jobs.image_asset_id AS "imageAssetId",
-            image_assets.relative_path AS "relativePath"
+            image_assets.relative_path AS "relativePath",
+            source_messages.platform AS "sourcePlatform",
+            source_messages.external_channel_id AS "externalChannelId",
+            source_messages.external_message_id AS "externalMessageId"
           FROM extraction_jobs
           JOIN image_assets ON image_assets.id = extraction_jobs.image_asset_id
-          WHERE extraction_jobs.status = 'queued'
+          JOIN source_messages ON source_messages.id = image_assets.source_message_id
+          WHERE (
+            extraction_jobs.status = 'queued'
             AND extraction_jobs.available_at <= now()
+          ) OR (
+            extraction_jobs.status = 'processing'
+            AND extraction_jobs.locked_at < now() - interval '5 minutes'
+          )
           ORDER BY extraction_jobs.available_at, extraction_jobs.id
           FOR UPDATE SKIP LOCKED
           LIMIT 1
@@ -44,7 +62,10 @@ export class ExtractionJobRepository {
         RETURNING
           extraction_jobs.id,
           extraction_jobs.image_asset_id AS "imageAssetId",
-          next_job."relativePath"
+          next_job."relativePath",
+          next_job."sourcePlatform",
+          next_job."externalChannelId",
+          next_job."externalMessageId"
       `,
       [workerId]
     );
@@ -52,40 +73,81 @@ export class ExtractionJobRepository {
     return result.rows[0] ?? null;
   }
 
-  async complete(jobId: number): Promise<void> {
-    await this.pool.query(
-      `
-        UPDATE extraction_jobs
-        SET
-          status = 'completed',
-          locked_at = NULL,
-          locked_by = NULL,
-          updated_at = now()
-        WHERE id = $1
-      `,
-      [jobId]
-    );
+  async complete(jobId: number, notification?: OutboundNotification): Promise<void> {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `
+          UPDATE extraction_jobs
+          SET
+            status = 'completed',
+            locked_at = NULL,
+            locked_by = NULL,
+            updated_at = now()
+          WHERE id = $1
+        `,
+        [jobId]
+      );
+      await insertOutboundNotification(client, notification);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
-  async fail(jobId: number, error: unknown): Promise<void> {
-    await this.pool.query(
-      `
-        UPDATE extraction_jobs
-        SET
-          status = 'failed',
-          locked_at = NULL,
-          locked_by = NULL,
-          last_error = $2,
-          updated_at = now()
-        WHERE id = $1
-      `,
-      [jobId, formatError(error)]
-    );
+  async fail(jobId: number, error: unknown, notification?: OutboundNotification): Promise<void> {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `
+          UPDATE extraction_jobs
+          SET
+            status = 'failed',
+            locked_at = NULL,
+            locked_by = NULL,
+            last_error = $2,
+            updated_at = now()
+          WHERE id = $1
+        `,
+        [jobId, formatError(error)]
+      );
+      await insertOutboundNotification(client, notification);
+      await client.query('COMMIT');
+    } catch (updateError) {
+      await client.query('ROLLBACK');
+      throw updateError;
+    } finally {
+      client.release();
+    }
   }
 
   async close(): Promise<void> {
     await this.pool.end();
   }
+}
+
+async function insertOutboundNotification(
+  client: pg.PoolClient,
+  notification: OutboundNotification | undefined
+): Promise<void> {
+  if (!notification) {
+    return;
+  }
+
+  await client.query(
+    `
+      INSERT INTO outbound_messages (platform, external_channel_id, text)
+      VALUES ($1, $2, $3)
+    `,
+    [notification.platform, notification.externalChannelId, notification.text]
+  );
 }
 
 function formatError(error: unknown): string {

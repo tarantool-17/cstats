@@ -38,7 +38,8 @@ The first implementation proves queue mechanics before OCR exists:
 3. Resolve `image_assets.relative_path` under `IMAGE_STORAGE_ROOT`.
 4. Confirm the image file exists.
 5. Mark the job `completed` when the file is present.
-6. Mark the job `failed` and store `last_error` when processing throws.
+6. Queue a Telegram result message through `outbound_messages`.
+7. Mark the job `failed`, store `last_error`, and queue a processing-error message when processing throws.
 
 This skeleton intentionally does not parse scoreboards yet. OCR and extraction-result persistence can replace the file-existence stub without changing the queue claiming contract.
 
