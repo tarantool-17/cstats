@@ -12,7 +12,7 @@ Startup order:
 
 1. `postgres` starts and becomes healthy.
 2. `migrate` applies every SQL file in `database/migrations`.
-3. `telegram-bot` starts after migrations succeed.
+3. `telegram-bot` starts after migrations succeed and dispatches queued outbound Telegram messages.
 4. `extraction-worker` starts after migrations succeed and claims queued jobs.
 
 Stop containers without deleting data:

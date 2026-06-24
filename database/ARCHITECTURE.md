@@ -10,6 +10,7 @@ The database service owns PostgreSQL schema, migrations, constraints, and queue 
 - image assets
 - extraction jobs
 - extraction results
+- outbound messages
 - review tasks
 - canonical players
 - player aliases
@@ -24,6 +25,7 @@ The database service owns PostgreSQL schema, migrations, constraints, and queue 
 source_messages
 image_assets
 extraction_jobs
+outbound_messages
 match_extractions
 match_extraction_players
 review_tasks
@@ -53,6 +55,24 @@ Use PostgreSQL as the async job queue.
 - `updated_at`
 
 Workers claim jobs with row locking. Failed jobs can be retried with backoff.
+
+`outbound_messages` should include:
+
+- `id`
+- `platform`
+- `external_channel_id`
+- `text`
+- `status`: `queued`, `sending`, `sent`, `failed`, `cancelled`
+- `attempt_count`
+- `available_at`
+- `locked_at`
+- `locked_by`
+- `last_error`
+- `sent_at`
+- `created_at`
+- `updated_at`
+
+The API service dispatches queued outbound messages so workers stay free of Telegram or Discord dependencies.
 
 ## Migration Application
 

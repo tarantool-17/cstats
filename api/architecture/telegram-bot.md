@@ -64,6 +64,8 @@ The handler should route:
 
 The bot should ignore messages from chats that are not explicitly allowed.
 
+After an image is ingested, the bot immediately acknowledges storage. Final extraction results are sent later through queued `outbound_messages` rows created by the worker and dispatched by the API service.
+
 ## Normalized Message
 
 Telegram messages should be converted before they reach application services:
