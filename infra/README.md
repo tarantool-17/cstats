@@ -1,6 +1,6 @@
 # Local Infrastructure
 
-Run Postgres, migrations, the Telegram bot, and the extraction worker together:
+Run Postgres, migrations, the Telegram bot, Docker Model Runner scoreboard OCR, and the extraction worker together:
 
 ```bash
 cp api/.env.example api/.env
@@ -13,7 +13,19 @@ Startup order:
 1. `postgres` starts and becomes healthy.
 2. `migrate` applies every SQL file in `database/migrations`.
 3. `telegram-bot` starts after migrations succeed and dispatches queued outbound Telegram messages.
-4. `extraction-worker` starts after migrations succeed and claims queued jobs.
+4. Docker Model Runner makes `ai/qwen3-vl:8B-Q8_K_XL` available to `extraction-worker`.
+5. `extraction-worker` starts after migrations succeed, claims queued jobs, calls the local vision model, and queues extraction summaries.
+
+The worker receives the model endpoint through Compose model variables:
+
+- `SCOREBOARD_MODEL_URL`
+- `SCOREBOARD_MODEL_NAME`
+
+Docker Desktop must have Docker Model Runner enabled and the local model available. The current Compose file uses:
+
+```text
+ai/qwen3-vl:8B-Q8_K_XL
+```
 
 Stop containers without deleting data:
 

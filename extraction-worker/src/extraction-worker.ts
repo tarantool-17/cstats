@@ -1,22 +1,28 @@
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { WorkerConfig } from './config.js';
+import { DockerModelRunnerScoreboardClient } from './docker-model-runner-scoreboard-client.js';
 import type { ClaimedExtractionJob, ExtractionJobRepository } from './extraction-job.repository.js';
 import { logError, logInfo } from './logger.js';
 import {
-  extractMatchStats,
+  extractScoreboardStub,
   renderProcessingError,
-  renderStatsNotification,
-  type MatchStats
-} from './match-stats-extractor.js';
+  renderScoreboardNotification,
+  type ScoreboardExtraction
+} from './scoreboard-extraction.js';
 
 export class ExtractionWorker {
   private running = false;
+  private readonly scoreboardClient?: DockerModelRunnerScoreboardClient;
 
   constructor(
     private readonly config: WorkerConfig,
     private readonly jobs: ExtractionJobRepository
-  ) {}
+  ) {
+    this.scoreboardClient = config.scoreboardModel
+      ? new DockerModelRunnerScoreboardClient(config.scoreboardModel)
+      : undefined;
+  }
 
   async start(): Promise<void> {
     this.running = true;
@@ -50,12 +56,12 @@ export class ExtractionWorker {
     logInfo('extractor_in_process', logFields);
 
     try {
-      const stats = await this.process(job);
+      const extraction = await this.process(job);
       await this.jobs.complete(job.id, {
         traceId: job.externalMessageId,
         platform: job.sourcePlatform,
         externalChannelId: job.externalChannelId,
-        text: renderStatsNotification(job, stats)
+        text: renderScoreboardNotification(job, extraction)
       });
       logInfo('telegram_outbound_ready', { ...logFields, status: 'completed' });
     } catch (error) {
@@ -71,7 +77,7 @@ export class ExtractionWorker {
     return true;
   }
 
-  private async process(job: ClaimedExtractionJob): Promise<MatchStats> {
+  private async process(job: ClaimedExtractionJob): Promise<ScoreboardExtraction> {
     const imagePath = join(this.config.imageStorageRoot, job.relativePath);
     try {
       await stat(imagePath);
@@ -79,7 +85,9 @@ export class ExtractionWorker {
       throw new Error(`Stored image file is missing: ${job.relativePath}`);
     }
 
-    return extractMatchStats(job);
+    return this.scoreboardClient
+      ? this.scoreboardClient.extract(imagePath)
+      : extractScoreboardStub(job);
   }
 }
 
