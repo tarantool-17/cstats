@@ -109,13 +109,19 @@ The worker should produce a normalized match fingerprint after OCR and normaliza
 
 The fingerprint should use:
 
-- datetime bucket if available
-- map name
-- team scores
-- sorted normalized player names or resolved canonical ids if provided later
-- sorted per-player stat rows
+- canonical CS2 map key resolved from `cs2_maps` / `cs2_map_aliases`
+- CT/T scores
+- resolved player ids from confirmed aliases, falling back to normalized OCR nicknames
+- player position within CT/T team
+- per-player stat columns
 
 The fingerprint must not use platform, channel, message id, sender id, or local image path.
+
+Duplicate matching should first try an exact fingerprint. Fuzzy matching may skip a
+duplicate only when the canonical map matches, scores are identical or one point
+apart, and at least eight player identity/team-position/stat rows are almost the
+same. This allows small OCR mistakes without collapsing unrelated matches from
+the same group.
 
 ## Testing Fixtures
 

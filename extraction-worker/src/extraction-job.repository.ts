@@ -2,9 +2,10 @@ import pg from 'pg';
 import { normalizeNicknameForLookup } from './nickname-normalization.js';
 import {
   buildScoreboardFingerprint,
-  countMatchingStatRows,
+  countAlmostMatchingPositionRows,
+  getScoreDistance,
   normalizeMapNameForLookup,
-  scoreStatRowSimilarity,
+  scorePositionRowSimilarity,
   type ScoreboardFingerprint
 } from './scoreboard-idempotency.js';
 import type { ScoreboardExtraction, ScoreboardPlayer } from './scoreboard-extraction.js';
@@ -175,7 +176,11 @@ async function upsertScoreboardExtraction(
   jobId: number,
   extraction: ScoreboardExtraction
 ): Promise<ScoreboardPersistenceResult> {
-  const resolvedExtraction = await resolveScoreboardMapName(client, extraction);
+  const mapResolvedExtraction = await resolveScoreboardMapName(client, extraction);
+  const resolvedExtraction = await resolveScoreboardPlayerIdentities(
+    client,
+    mapResolvedExtraction
+  );
   const existingMatchExtractionId = await findExistingMatchExtractionIdForJob(client, jobId);
   const fingerprint = buildScoreboardFingerprint(resolvedExtraction);
   const idempotency = await classifyScoreboardIdempotency(
@@ -211,6 +216,40 @@ async function upsertScoreboardExtraction(
     matchExtractionId,
     extraction: resolvedExtraction,
     idempotency
+  };
+}
+
+async function resolveScoreboardPlayerIdentities(
+  client: pg.PoolClient,
+  extraction: ScoreboardExtraction
+): Promise<ScoreboardExtraction> {
+  const normalizedNicknames = [
+    ...new Set(
+      extraction.players
+        .map((player) => normalizeNicknameForLookup(player.rawNickname))
+        .filter((nickname): nickname is string => nickname !== null)
+    )
+  ];
+  const aliases = await findConfirmedAliases(client, normalizedNicknames);
+
+  return {
+    ...extraction,
+    players: extraction.players.map((player) => {
+      const normalizedNickname = normalizeNicknameForLookup(player.rawNickname);
+      const alias = normalizedNickname ? aliases.get(normalizedNickname) : null;
+
+      return {
+        ...player,
+        normalizedNickname,
+        playerId: alias?.playerId ?? null,
+        resolvedAliasId: alias?.aliasId ?? null,
+        playerIdentityKey: alias
+          ? `player:${alias.playerId}`
+          : normalizedNickname
+            ? `nick:${normalizedNickname}`
+            : null
+      };
+    })
   };
 }
 
@@ -389,7 +428,7 @@ async function classifyScoreboardIdempotency(
       fingerprint,
       duplicateOfMatchExtractionId: exactDuplicate.id,
       duplicateMatchType: 'exact_duplicate',
-      duplicateReason: 'same normalized map, CT/T score, player rank order, and player stat rows',
+      duplicateReason: 'same normalized map, CT/T score, player identities, team positions, and stat rows',
       duplicateMatchScore: 100,
       skipStats: true
     };
@@ -406,7 +445,7 @@ async function classifyScoreboardIdempotency(
       fingerprint,
       duplicateOfMatchExtractionId: strongFuzzyDuplicate.id,
       duplicateMatchType: 'strong_fuzzy_duplicate',
-      duplicateReason: `same map and score with ${strongFuzzyDuplicate.matchingStatRows} matching player stat rows`,
+      duplicateReason: `same map, near score, and ${strongFuzzyDuplicate.matchingPositionRows} matching player position/stat rows`,
       duplicateMatchScore: strongFuzzyDuplicate.score,
       skipStats: true
     };
@@ -447,11 +486,10 @@ async function findStrongFuzzyDuplicate(
   client: pg.PoolClient,
   fingerprint: ScoreboardFingerprint,
   excludeMatchExtractionId: number | null
-): Promise<{ id: number; matchingStatRows: number; score: number } | null> {
+): Promise<{ id: number; matchingPositionRows: number; score: number } | null> {
   if (
     !fingerprint.normalizedMapName ||
-    !fingerprint.unorderedScoreKey ||
-    fingerprint.statRowKeys.length < 8
+    fingerprint.orderedRows.filter((row) => row.playerIdentityKey !== null && row.team !== 'unknown').length < 8
   ) {
     return null;
   }
@@ -472,13 +510,12 @@ async function findStrongFuzzyDuplicate(
         t_score AS "tScore"
       FROM match_extractions
       WHERE normalized_map_name = $1
-        AND unordered_score_key = $2
         AND duplicate_of_match_extraction_id IS NULL
-        AND ($3::integer IS NULL OR id <> $3)
-      ORDER BY id
-      LIMIT 25
+        AND ($2::integer IS NULL OR id <> $2)
+      ORDER BY id DESC
+      LIMIT 50
     `,
-    [fingerprint.normalizedMapName, fingerprint.unorderedScoreKey, excludeMatchExtractionId]
+    [fingerprint.normalizedMapName, excludeMatchExtractionId]
   );
 
   if (candidates.rowCount === 0) {
@@ -515,14 +552,14 @@ async function findStrongFuzzyDuplicate(
     [candidateIds]
   );
 
-  let best: { id: number; matchingStatRows: number; score: number } | null = null;
+  let best: { id: number; matchingPositionRows: number; score: number } | null = null;
 
   for (const candidate of candidates.rows) {
     const candidatePlayers = players.rows
       .filter((player) => player.matchExtractionId === candidate.id)
       .sort((first, second) => first.rowNumber - second.rowNumber)
       .map(({ matchExtractionId: _matchExtractionId, rowNumber: _rowNumber, ...player }) => player);
-    const candidateFingerprint = buildScoreboardFingerprint({
+    const candidateExtraction = await resolveScoreboardPlayerIdentities(client, {
       mapName: candidate.mapName,
       mapKey: candidate.mapKey,
       ctScore: candidate.ctScore,
@@ -531,24 +568,31 @@ async function findStrongFuzzyDuplicate(
       warnings: [],
       players: candidatePlayers
     });
-    const matchingStatRows = countMatchingStatRows(
-      fingerprint.statRowKeys,
-      candidateFingerprint.statRowKeys
-    );
+    const candidateFingerprint = buildScoreboardFingerprint(candidateExtraction);
+    const scoreDistance = getScoreDistance(fingerprint, candidateFingerprint);
 
-    if (matchingStatRows < 8) {
+    if (scoreDistance === null || scoreDistance > 1) {
       continue;
     }
 
-    const score = scoreStatRowSimilarity(
-      fingerprint.statRowKeys,
-      candidateFingerprint.statRowKeys
+    const matchingPositionRows = countAlmostMatchingPositionRows(
+      fingerprint.orderedRows,
+      candidateFingerprint.orderedRows
     );
 
-    if (!best || matchingStatRows > best.matchingStatRows || score > best.score) {
+    if (matchingPositionRows < 8) {
+      continue;
+    }
+
+    const score = scorePositionRowSimilarity(
+      fingerprint.orderedRows,
+      candidateFingerprint.orderedRows
+    );
+
+    if (!best || matchingPositionRows > best.matchingPositionRows || score > best.score) {
       best = {
         id: candidate.id,
-        matchingStatRows,
+        matchingPositionRows,
         score
       };
     }
@@ -600,8 +644,10 @@ async function upsertMatchPlayerStat(
   extractionPlayerId: number,
   player: ScoreboardPlayer
 ): Promise<void> {
-  const normalizedNickname = normalizeNicknameForLookup(player.rawNickname);
-  const resolvedAlias = normalizedNickname
+  const normalizedNickname = player.normalizedNickname ?? normalizeNicknameForLookup(player.rawNickname);
+  const resolvedAlias = player.playerId && player.resolvedAliasId
+    ? { playerId: player.playerId, aliasId: player.resolvedAliasId }
+    : normalizedNickname
     ? await findConfirmedAlias(client, normalizedNickname)
     : null;
 
@@ -651,6 +697,42 @@ async function upsertMatchPlayerStat(
       player.adrOrKast,
       player.damage
     ]
+  );
+}
+
+async function findConfirmedAliases(
+  client: pg.PoolClient,
+  normalizedNicknames: string[]
+): Promise<Map<string, { playerId: number; aliasId: number }>> {
+  if (normalizedNicknames.length === 0) {
+    return new Map();
+  }
+
+  const result = await client.query<{
+    normalizedAlias: string;
+    playerId: number;
+    aliasId: number;
+  }>(
+    `
+      SELECT
+        normalized_alias AS "normalizedAlias",
+        player_id AS "playerId",
+        id AS "aliasId"
+      FROM player_aliases
+      WHERE normalized_alias = ANY($1::text[])
+        AND status = 'confirmed'
+    `,
+    [normalizedNicknames]
+  );
+
+  return new Map(
+    result.rows.map((row) => [
+      row.normalizedAlias,
+      {
+        playerId: row.playerId,
+        aliasId: row.aliasId
+      }
+    ])
   );
 }
 

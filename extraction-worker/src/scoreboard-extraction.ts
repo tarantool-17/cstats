@@ -5,6 +5,10 @@ export type ScoreboardTeam = 'CT' | 'T' | 'unknown';
 export type ScoreboardPlayer = {
   team: ScoreboardTeam;
   rawNickname: string | null;
+  normalizedNickname?: string | null;
+  playerIdentityKey?: string | null;
+  playerId?: number | null;
+  resolvedAliasId?: number | null;
   kills: number | null;
   deaths: number | null;
   assists: number | null;
