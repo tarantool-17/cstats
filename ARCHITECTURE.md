@@ -1,4 +1,4 @@
-# CStats Solution Architecture
+# CStats Architecture
 
 ## Purpose
 
@@ -9,33 +9,31 @@ The project is kept in one repository as a small monorepo. Each deployable servi
 ## Repository Layout
 
 ```text
-solution/
+ARCHITECTURE.md
+api/
   ARCHITECTURE.md
-  services/
-    api/
-      ARCHITECTURE.md
-    extraction-worker/
-      ARCHITECTURE.md
-    database/
-      ARCHITECTURE.md
+database/
+  ARCHITECTURE.md
+extraction-worker/
+  ARCHITECTURE.md
+infra/
+  docker-compose.yml
 ```
 
 Future code can live in the same folders:
 
 ```text
-solution/
-  services/
-    api/
-      src/
-    extraction-worker/
-      src/
-    database/
-      migrations/
-      seeds/
-  fixtures/
-    cs2-scoreboards/
-  infra/
-    docker-compose.yml
+api/
+  src/
+database/
+  migrations/
+  seeds/
+extraction-worker/
+  src/
+fixtures/
+  cs2-scoreboards/
+infra/
+  docker-compose.yml
 ```
 
 ## Services
