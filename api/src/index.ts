@@ -4,6 +4,7 @@ import { TelegramApi } from './channels/telegram/telegram-api.js';
 import { TelegramBot } from './channels/telegram/telegram-bot.js';
 import { TelegramUpdateHandler } from './channels/telegram/telegram-update-handler.js';
 import { PostgresIngestionRepository } from './db/postgres-ingestion.repository.js';
+import { PostgresPlayerAliasRepository } from './identity/player-alias.repository.js';
 import { IngestionService } from './ingestion/ingestion.service.js';
 import { renderIngestionResult } from './ingestion/ingestion-response-renderer.js';
 import { logInfo } from './logger.js';
@@ -12,7 +13,6 @@ import { PostgresOutboundMessageRepository } from './outbound/outbound-message.r
 import { DiskImageStorage } from './storage/disk-image-storage.js';
 
 const config = createTelegramConfig(process.env);
-const commandRouter = new SimpleCommandRouter();
 const imageStorageRoot = process.env.IMAGE_STORAGE_ROOT ?? '/tmp/cstats/images';
 const ingestionRepository = process.env.DATABASE_URL
   ? new PostgresIngestionRepository(process.env.DATABASE_URL)
@@ -20,6 +20,10 @@ const ingestionRepository = process.env.DATABASE_URL
 const outboundRepository = process.env.DATABASE_URL
   ? new PostgresOutboundMessageRepository(process.env.DATABASE_URL)
   : undefined;
+const playerAliasRepository = process.env.DATABASE_URL
+  ? new PostgresPlayerAliasRepository(process.env.DATABASE_URL)
+  : undefined;
+const commandRouter = new SimpleCommandRouter(playerAliasRepository);
 const ingestionService = new IngestionService(new DiskImageStorage(imageStorageRoot), ingestionRepository);
 const updateHandler = new TelegramUpdateHandler({
   config,
@@ -72,6 +76,7 @@ await Promise.all([
 
 await ingestionRepository?.close();
 await outboundRepository?.close();
+await playerAliasRepository?.close();
 
 function readPositiveInt(value: string | undefined, fallback: number): number {
   if (!value) {
