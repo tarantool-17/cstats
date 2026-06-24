@@ -66,6 +66,16 @@ The bot should ignore messages from chats that are not explicitly allowed.
 
 After an image is ingested, the bot immediately acknowledges storage. Final extraction results are sent later through queued `outbound_messages` rows created by the worker and dispatched by the API service.
 
+Each allowed Telegram message should receive a Telegram response: command result, image-ingestion result, unsupported-message hint, or processing error.
+
+Docker logs should include `trace_id` equal to the Telegram message id for each major step:
+
+- `telegram_message_received`
+- `telegram_message_put_in_db`
+- `extractor_in_process`
+- `telegram_outbound_ready`
+- `telegram_outbound_sent`
+
 ## Normalized Message
 
 Telegram messages should be converted before they reach application services:

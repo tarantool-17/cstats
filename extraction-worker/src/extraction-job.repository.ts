@@ -12,6 +12,7 @@ export type ClaimedExtractionJob = {
 };
 
 export type OutboundNotification = {
+  traceId: string;
   platform: 'telegram';
   externalChannelId: string;
   text: string;
@@ -143,10 +144,10 @@ async function insertOutboundNotification(
 
   await client.query(
     `
-      INSERT INTO outbound_messages (platform, external_channel_id, text)
-      VALUES ($1, $2, $3)
+      INSERT INTO outbound_messages (trace_id, platform, external_channel_id, text)
+      VALUES ($1, $2, $3, $4)
     `,
-    [notification.platform, notification.externalChannelId, notification.text]
+    [notification.traceId, notification.platform, notification.externalChannelId, notification.text]
   );
 }
 

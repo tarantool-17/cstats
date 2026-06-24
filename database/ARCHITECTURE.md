@@ -59,6 +59,7 @@ Workers claim jobs with row locking. Failed jobs can be retried with backoff.
 `outbound_messages` should include:
 
 - `id`
+- `trace_id`
 - `platform`
 - `external_channel_id`
 - `text`
