@@ -3,6 +3,7 @@ import { access, stat } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, resolve, sep, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Buffer } from 'node:buffer';
 import pg from 'pg';
 
 const { Pool } = pg;
@@ -23,6 +24,7 @@ type MatchListItem = {
 };
 
 type MatchPlayerStat = {
+  id: number;
   nickname: string;
   rawNickname: string | null;
   canonicalPlayerId: number | null;
@@ -52,6 +54,18 @@ type RankPlayerStat = {
 
 type ScoreboardTeam = 'CT' | 'T' | 'unknown';
 
+const POSTGRES_INTEGER_MAX = 2147483647;
+
+type SaveMatchPlayerInput = {
+  id: number;
+  canonicalPlayerId: number | null;
+  kills: number | null;
+  deaths: number | null;
+  assists: number | null;
+  headshotPercent: number | null;
+  damage: number | null;
+};
+
 const serverDir = dirname(fileURLToPath(import.meta.url));
 
 const config = {
@@ -68,6 +82,11 @@ const server = createServer(async (request, response) => {
   try {
     await routeRequest(request, response);
   } catch (error) {
+    if (error instanceof HttpError) {
+      sendJson(response, error.status, { error: error.message });
+      return;
+    }
+
     console.error(JSON.stringify({ level: 'error', step: 'web_request_failed', error: formatError(error) }));
     sendJson(response, 500, { error: 'Internal server error' });
   }
@@ -101,6 +120,31 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
     ]);
 
     sendJson(response, 200, { matches, images: matches, canonicalPlayers });
+    return;
+  }
+
+  const matchPlayersRoute = url.pathname.match(/^\/api\/matches\/(\d+)\/players$/);
+  if (request.method === 'PUT' && matchPlayersRoute) {
+    const matchExtractionId = Number.parseInt(matchPlayersRoute[1], 10);
+    if (!Number.isSafeInteger(matchExtractionId) || matchExtractionId <= 0) {
+      throw new HttpError(400, 'Invalid match id');
+    }
+
+    const body = await readJsonBody(request);
+    const players = parseSaveMatchPlayersRequest(body);
+    const savedPlayers = await saveMatchPlayers(matchExtractionId, players);
+    const [allTime, lastThreeMonths] = await Promise.all([
+      listRank(false),
+      listRank(true)
+    ]);
+
+    sendJson(response, 200, {
+      players: savedPlayers,
+      rank: {
+        allTime,
+        lastThreeMonths
+      }
+    });
     return;
   }
 
@@ -198,6 +242,7 @@ async function listTeamPlayers(matchExtractionIds: number[]): Promise<Map<number
 
   const result = await pool.query<{
     match_extraction_id: number;
+    match_extraction_player_id: number;
     row_number: number;
     team: ScoreboardTeam;
     raw_nickname: string | null;
@@ -213,6 +258,7 @@ async function listTeamPlayers(matchExtractionIds: number[]): Promise<Map<number
     `
       SELECT
         match_extraction_players.match_extraction_id,
+        match_extraction_players.id AS match_extraction_player_id,
         match_extraction_players.row_number,
         match_extraction_players.team,
         match_extraction_players.raw_nickname,
@@ -262,6 +308,7 @@ async function listTeamPlayers(matchExtractionIds: number[]): Promise<Map<number
   for (const row of result.rows) {
     const players = extractedPlayersByMatchId.get(row.match_extraction_id) ?? [];
     players.push({
+      id: row.match_extraction_player_id,
       nickname: row.nickname,
       rawNickname: row.raw_nickname,
       canonicalPlayerId: row.canonical_player_id,
@@ -419,6 +466,256 @@ async function listRank(recentOnly: boolean): Promise<RankPlayerStat[]> {
   }));
 }
 
+async function saveMatchPlayers(
+  matchExtractionId: number,
+  players: SaveMatchPlayerInput[]
+): Promise<MatchPlayerStat[]> {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const matchResult = await client.query<{ id: number }>(
+      `
+        SELECT id
+        FROM match_extractions
+        WHERE id = $1
+          AND duplicate_of_match_extraction_id IS NULL
+        FOR UPDATE
+      `,
+      [matchExtractionId]
+    );
+    if (matchResult.rowCount === 0) {
+      throw new HttpError(404, 'Match not found');
+    }
+
+    if (players.length > 0) {
+      await saveMatchPlayerRows(client, matchExtractionId, players);
+    }
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  return (await listTeamPlayers([matchExtractionId])).get(matchExtractionId) ?? [];
+}
+
+async function saveMatchPlayerRows(
+  client: pg.PoolClient,
+  matchExtractionId: number,
+  players: SaveMatchPlayerInput[]
+): Promise<void> {
+  const ids = players.map((player) => player.id);
+  const existingPlayers = await client.query<{
+    id: number;
+    raw_nickname: string | null;
+    team: ScoreboardTeam;
+  }>(
+    `
+      SELECT id, raw_nickname, team
+      FROM match_extraction_players
+      WHERE match_extraction_id = $1
+        AND id = ANY($2::integer[])
+      FOR UPDATE
+    `,
+    [matchExtractionId, ids]
+  );
+
+  if (existingPlayers.rowCount !== ids.length) {
+    throw new HttpError(400, 'One or more players do not belong to this match');
+  }
+
+  const existingPlayersById = new Map(existingPlayers.rows.map((player) => [player.id, player]));
+  const canonicalPlayerIds = [
+    ...new Set(
+      players
+        .map((player) => player.canonicalPlayerId)
+        .filter((playerId): playerId is number => playerId !== null)
+    )
+  ];
+  const canonicalPlayers = await findCanonicalPlayers(client, canonicalPlayerIds);
+
+  if (canonicalPlayers.size !== canonicalPlayerIds.length) {
+    throw new HttpError(400, 'One or more canonical players do not exist');
+  }
+
+  for (const player of players) {
+    const existingPlayer = existingPlayersById.get(player.id);
+    if (!existingPlayer) {
+      throw new HttpError(400, 'One or more players do not belong to this match');
+    }
+
+    const normalizedNickname = normalizeNicknameForLookup(existingPlayer.raw_nickname);
+    let resolvedAliasId: number | null = null;
+
+    if (player.canonicalPlayerId !== null) {
+      if (!normalizedNickname || !existingPlayer.raw_nickname) {
+        throw new HttpError(400, 'Cannot attach a canonical player without an extracted nickname');
+      }
+
+      resolvedAliasId = await saveConfirmedAliasForPlayer(
+        client,
+        player.canonicalPlayerId,
+        existingPlayer.raw_nickname,
+        normalizedNickname
+      );
+    }
+
+    await client.query(
+      `
+        UPDATE match_extraction_players
+        SET
+          kills = $2,
+          deaths = $3,
+          assists = $4,
+          adr_or_kast = $5,
+          damage = $6,
+          updated_at = now()
+        WHERE id = $1
+      `,
+      [
+        player.id,
+        player.kills,
+        player.deaths,
+        player.assists,
+        player.headshotPercent,
+        player.damage
+      ]
+    );
+
+    await client.query(
+      `
+        INSERT INTO match_player_stats (
+          match_extraction_player_id,
+          player_id,
+          resolved_alias_id,
+          resolution_status,
+          raw_nickname,
+          normalized_nickname,
+          team,
+          kills,
+          deaths,
+          assists,
+          adr_or_kast,
+          damage
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT (match_extraction_player_id) DO UPDATE
+        SET
+          player_id = EXCLUDED.player_id,
+          resolved_alias_id = EXCLUDED.resolved_alias_id,
+          resolution_status = EXCLUDED.resolution_status,
+          raw_nickname = EXCLUDED.raw_nickname,
+          normalized_nickname = EXCLUDED.normalized_nickname,
+          team = EXCLUDED.team,
+          kills = EXCLUDED.kills,
+          deaths = EXCLUDED.deaths,
+          assists = EXCLUDED.assists,
+          adr_or_kast = EXCLUDED.adr_or_kast,
+          damage = EXCLUDED.damage,
+          updated_at = now()
+      `,
+      [
+        player.id,
+        player.canonicalPlayerId,
+        resolvedAliasId,
+        player.canonicalPlayerId === null ? 'unresolved' : 'resolved',
+        existingPlayer.raw_nickname,
+        normalizedNickname,
+        existingPlayer.team,
+        player.kills,
+        player.deaths,
+        player.assists,
+        player.headshotPercent,
+        player.damage
+      ]
+    );
+  }
+}
+
+async function findCanonicalPlayers(
+  client: pg.PoolClient,
+  playerIds: number[]
+): Promise<Map<number, string>> {
+  if (playerIds.length === 0) {
+    return new Map();
+  }
+
+  const result = await client.query<{ id: number; display_name: string }>(
+    `
+      SELECT id, display_name
+      FROM players
+      WHERE id = ANY($1::integer[])
+    `,
+    [playerIds]
+  );
+
+  return new Map(result.rows.map((player) => [player.id, player.display_name]));
+}
+
+async function saveConfirmedAliasForPlayer(
+  client: pg.PoolClient,
+  playerId: number,
+  aliasText: string,
+  normalizedAlias: string
+): Promise<number> {
+  const existingAlias = await client.query<{
+    id: number;
+    player_id: number;
+    display_name: string;
+  }>(
+    `
+      SELECT
+        player_aliases.id,
+        player_aliases.player_id,
+        players.display_name
+      FROM player_aliases
+      JOIN players ON players.id = player_aliases.player_id
+      WHERE player_aliases.normalized_alias = $1
+        AND player_aliases.status = 'confirmed'
+      LIMIT 1
+    `,
+    [normalizedAlias]
+  );
+  const existingConfirmedAlias = existingAlias.rows[0];
+
+  if (existingConfirmedAlias) {
+    if (existingConfirmedAlias.player_id !== playerId) {
+      throw new HttpError(
+        409,
+        `Alias "${aliasText}" is already confirmed for ${existingConfirmedAlias.display_name}`
+      );
+    }
+
+    return existingConfirmedAlias.id;
+  }
+
+  const savedAlias = await client.query<{ id: number }>(
+    `
+      INSERT INTO player_aliases (
+        player_id,
+        alias_text,
+        normalized_alias,
+        status
+      )
+      VALUES ($1, $2, $3, 'confirmed')
+      ON CONFLICT (player_id, normalized_alias) DO UPDATE
+      SET
+        alias_text = EXCLUDED.alias_text,
+        status = 'confirmed',
+        updated_at = now()
+      RETURNING id
+    `,
+    [playerId, aliasText, normalizedAlias]
+  );
+
+  return savedAlias.rows[0].id;
+}
+
 async function sendImage(
   request: IncomingMessage,
   response: ServerResponse,
@@ -529,6 +826,118 @@ function sendText(response: ServerResponse, status: number, body: string): void 
   response.end(body);
 }
 
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let byteLength = 0;
+
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    byteLength += buffer.byteLength;
+    if (byteLength > 1024 * 1024) {
+      throw new HttpError(413, 'Request body is too large');
+    }
+
+    chunks.push(buffer);
+  }
+
+  if (chunks.length === 0) {
+    throw new HttpError(400, 'Missing JSON body');
+  }
+
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+  } catch {
+    throw new HttpError(400, 'Invalid JSON body');
+  }
+}
+
+function parseSaveMatchPlayersRequest(body: unknown): SaveMatchPlayerInput[] {
+  if (!isRecord(body) || !Array.isArray(body.players)) {
+    throw new HttpError(400, 'Expected a players array');
+  }
+
+  const seenIds = new Set<number>();
+
+  return body.players.map((player, index) => {
+    if (!isRecord(player)) {
+      throw new HttpError(400, `players[${index}] must be an object`);
+    }
+
+    const id = readPositiveInteger(player.id, `players[${index}].id`);
+    if (seenIds.has(id)) {
+      throw new HttpError(400, `players[${index}].id is duplicated`);
+    }
+    seenIds.add(id);
+
+    return {
+      id,
+      canonicalPlayerId: readNullablePositiveInteger(
+        player.canonicalPlayerId,
+        `players[${index}].canonicalPlayerId`
+      ),
+      kills: readNullableNonNegativeInteger(player.kills, `players[${index}].kills`),
+      deaths: readNullableNonNegativeInteger(player.deaths, `players[${index}].deaths`),
+      assists: readNullableNonNegativeInteger(player.assists, `players[${index}].assists`),
+      headshotPercent: readNullableNonNegativeInteger(
+        player.headshotPercent,
+        `players[${index}].headshotPercent`
+      ),
+      damage: readNullableNonNegativeInteger(player.damage, `players[${index}].damage`)
+    };
+  });
+}
+
+function readPositiveInteger(value: unknown, field: string): number {
+  if (
+    typeof value !== 'number'
+    || !Number.isSafeInteger(value)
+    || value <= 0
+    || value > POSTGRES_INTEGER_MAX
+  ) {
+    throw new HttpError(400, `${field} must be a positive integer`);
+  }
+
+  return value;
+}
+
+function readNullablePositiveInteger(value: unknown, field: string): number | null {
+  if (value === null) {
+    return null;
+  }
+
+  return readPositiveInteger(value, field);
+}
+
+function readNullableNonNegativeInteger(value: unknown, field: string): number | null {
+  if (value === null) {
+    return null;
+  }
+
+  if (
+    typeof value !== 'number'
+    || !Number.isSafeInteger(value)
+    || value < 0
+    || value > POSTGRES_INTEGER_MAX
+  ) {
+    throw new HttpError(400, `${field} must be a non-negative integer or null`);
+  }
+
+  return value;
+}
+
+function normalizeNicknameForLookup(nickname: string | null): string | null {
+  if (nickname === null) {
+    return null;
+  }
+
+  const normalized = nickname.trim().toLowerCase().replace(/\s+/g, ' ');
+  return normalized.length > 0 ? normalized : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function isPathInside(root: string, candidate: string): boolean {
   return candidate === root || candidate.startsWith(`${root}${sep}`);
 }
@@ -580,4 +989,13 @@ function formatError(error: unknown): string {
   }
 
   return String(error);
+}
+
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(message);
+  }
 }

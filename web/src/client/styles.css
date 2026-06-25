@@ -341,6 +341,22 @@ h2 {
   opacity: 0.5;
 }
 
+.primary-action:disabled {
+  cursor: default;
+  opacity: 0.68;
+  box-shadow: none;
+}
+
+.save-error {
+  padding: 10px 12px;
+  border: 1px solid rgba(190, 56, 45, 0.28);
+  border-radius: 8px;
+  background: rgba(190, 56, 45, 0.08);
+  color: #963126;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .table-wrap {
   overflow: hidden;
   border: 1px solid rgba(28, 34, 43, 0.12);
@@ -388,6 +404,14 @@ tr:last-child td {
   border-bottom: 0;
 }
 
+.unresolved-player-row td {
+  background: #f2b8b8;
+}
+
+.unresolved-player-row:hover td {
+  background: #eda8a8;
+}
+
 .nickname {
   font-weight: 750;
 }
@@ -410,6 +434,12 @@ tr:last-child td {
 .player-select:focus {
   border-color: #21a1b3;
   outline: 3px solid rgba(33, 161, 179, 0.16);
+}
+
+.player-select:disabled,
+.stat-input:disabled {
+  cursor: default;
+  opacity: 0.72;
 }
 
 .raw-nickname {
