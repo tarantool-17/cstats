@@ -18,6 +18,7 @@ type MatchListItem = {
 };
 
 type PlayerStat = {
+  id: number;
   nickname: string;
   rawNickname: string | null;
   canonicalPlayerId: number | null;
@@ -48,6 +49,11 @@ type RankPlayerStat = {
 type RankData = {
   allTime: RankPlayerStat[];
   lastThreeMonths: RankPlayerStat[];
+};
+
+type SaveMatchPlayersResponse = {
+  players: PlayerStat[];
+  rank: RankData;
 };
 
 type LoadState =
@@ -100,7 +106,13 @@ function App() {
   }, []);
 
   const title = activeTab === 'rank' ? 'Team Rank' : 'Unique Matches';
-  const handleMatchPlayersSave = (matchId: number, players: PlayerStat[]) => {
+  const handleMatchPlayersSave = async (matchId: number, players: PlayerStat[]) => {
+    const result = await fetchJson<SaveMatchPlayersResponse>(`/api/matches/${matchId}/players`, {
+      body: JSON.stringify({ players }),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'PUT'
+    });
+
     setState((current) => {
       if (current.status !== 'loaded') {
         return current;
@@ -108,11 +120,14 @@ function App() {
 
       return {
         ...current,
+        rank: result.rank,
         matches: current.matches.map((match) => (
-          match.id === matchId ? { ...match, players } : match
+          match.id === matchId ? { ...match, players: result.players } : match
         ))
       };
     });
+
+    return result.players;
   };
 
   return (
@@ -167,13 +182,22 @@ function App() {
   );
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init);
   if (!response.ok) {
-    throw new Error(`Could not load ${url}.`);
+    throw new Error(await readResponseError(response, `Could not load ${url}.`));
   }
 
   return response.json() as Promise<T>;
+}
+
+async function readResponseError(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = await response.json() as { error?: unknown };
+    return typeof body.error === 'string' ? body.error : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function SummaryItem({ label, value }: { label: string; value: number | string }) {
@@ -247,9 +271,11 @@ function MatchCard({
 }: {
   canonicalPlayers: CanonicalPlayer[];
   match: MatchListItem;
-  onPlayersSave: (matchId: number, players: PlayerStat[]) => void;
+  onPlayersSave: (matchId: number, players: PlayerStat[]) => Promise<PlayerStat[]>;
 }) {
   const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [draftPlayers, setDraftPlayers] = useState<DraftPlayerStat[]>(() => toDraftPlayers(match.players));
 
   useEffect(() => {
@@ -260,13 +286,30 @@ function MatchCard({
 
   const handleEdit = () => {
     setDraftPlayers(toDraftPlayers(match.players));
+    setSaveError(null);
     setIsEditing(true);
   };
 
-  const handleSave = () => {
-    const savedPlayers = draftPlayers.map((player) => fromDraftPlayer(player, canonicalPlayers));
-    onPlayersSave(match.id, savedPlayers);
+  const handleCancel = () => {
+    setDraftPlayers(toDraftPlayers(match.players));
+    setSaveError(null);
     setIsEditing(false);
+  };
+
+  const handleSave = async () => {
+    const savedPlayers = draftPlayers.map((player) => fromDraftPlayer(player, canonicalPlayers));
+
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      const refreshedPlayers = await onPlayersSave(match.id, savedPlayers);
+      setDraftPlayers(toDraftPlayers(refreshedPlayers));
+      setIsEditing(false);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleDraftChange = (
@@ -314,20 +357,27 @@ function MatchCard({
                 {match.duplicateCount === 1 ? '' : 's'} hidden
               </span>
             )}
-            <button className="secondary-action" type="button" onClick={handleEdit} disabled={isEditing}>
+            <button className="secondary-action" type="button" onClick={handleEdit} disabled={isEditing || isSaving}>
               Edit
             </button>
             {isEditing && (
-              <button className="primary-action" type="button" onClick={handleSave}>
-                Save
-              </button>
+              <>
+                <button className="secondary-action" type="button" onClick={handleCancel} disabled={isSaving}>
+                  Cancel
+                </button>
+                <button className="primary-action" type="button" onClick={handleSave} disabled={isSaving}>
+                  {isSaving ? 'Saving...' : 'Save'}
+                </button>
+              </>
             )}
           </div>
         </div>
+        {saveError && <div className="save-error" role="alert">{saveError}</div>}
         <PlayerTable
           canonicalPlayers={canonicalPlayers}
           draftPlayers={draftPlayers}
           isEditing={isEditing}
+          isSaving={isSaving}
           onCanonicalPlayerChange={handleCanonicalPlayerChange}
           onDraftChange={handleDraftChange}
           players={match.players}
@@ -358,6 +408,7 @@ function PlayerTable({
   canonicalPlayers,
   draftPlayers,
   isEditing,
+  isSaving,
   onCanonicalPlayerChange,
   onDraftChange,
   players
@@ -365,6 +416,7 @@ function PlayerTable({
   canonicalPlayers: CanonicalPlayer[];
   draftPlayers: DraftPlayerStat[];
   isEditing: boolean;
+  isSaving: boolean;
   onCanonicalPlayerChange: (playerIndex: number, value: string) => void;
   onDraftChange: (playerIndex: number, field: EditablePlayerStatField, value: string) => void;
   players: PlayerStat[];
@@ -393,13 +445,17 @@ function PlayerTable({
         <tbody>
           {players.map((player, index) => {
             const draftPlayer = draftPlayers[index] ?? toDraftPlayer(player);
+            const isCanonicalPlayerMissing = isEditing
+              ? draftPlayer.canonicalPlayerId === ''
+              : player.canonicalPlayerId === null;
 
             return (
-              <tr key={`${player.nickname}-${index}`}>
+              <tr className={isCanonicalPlayerMissing ? 'unresolved-player-row' : undefined} key={player.id}>
                 <PlayerNameCell
                   canonicalPlayers={canonicalPlayers}
                   draftPlayer={draftPlayer}
                   isEditing={isEditing}
+                  isSaving={isSaving}
                   onCanonicalPlayerChange={onCanonicalPlayerChange}
                   player={player}
                   playerIndex={index}
@@ -410,6 +466,7 @@ function PlayerTable({
                   playerIndex={index}
                   value={player.kills}
                   draftValue={draftPlayer.kills}
+                  disabled={isSaving}
                   onDraftChange={onDraftChange}
                 />
                 <EditableStatCell
@@ -418,6 +475,7 @@ function PlayerTable({
                   playerIndex={index}
                   value={player.deaths}
                   draftValue={draftPlayer.deaths}
+                  disabled={isSaving}
                   onDraftChange={onDraftChange}
                 />
                 <EditableStatCell
@@ -426,6 +484,7 @@ function PlayerTable({
                   playerIndex={index}
                   value={player.assists}
                   draftValue={draftPlayer.assists}
+                  disabled={isSaving}
                   onDraftChange={onDraftChange}
                 />
                 <EditableStatCell
@@ -434,6 +493,7 @@ function PlayerTable({
                   playerIndex={index}
                   value={player.headshotPercent}
                   draftValue={draftPlayer.headshotPercent}
+                  disabled={isSaving}
                   onDraftChange={onDraftChange}
                   formatter={formatPercent}
                 />
@@ -443,6 +503,7 @@ function PlayerTable({
                   playerIndex={index}
                   value={player.damage}
                   draftValue={draftPlayer.damage}
+                  disabled={isSaving}
                   onDraftChange={onDraftChange}
                 />
               </tr>
@@ -458,6 +519,7 @@ function PlayerNameCell({
   canonicalPlayers,
   draftPlayer,
   isEditing,
+  isSaving,
   onCanonicalPlayerChange,
   player,
   playerIndex
@@ -465,6 +527,7 @@ function PlayerNameCell({
   canonicalPlayers: CanonicalPlayer[];
   draftPlayer: DraftPlayerStat;
   isEditing: boolean;
+  isSaving: boolean;
   onCanonicalPlayerChange: (playerIndex: number, value: string) => void;
   player: PlayerStat;
   playerIndex: number;
@@ -480,6 +543,7 @@ function PlayerNameCell({
       <select
         aria-label={`Canonical player for ${extractedName}`}
         className="player-select"
+        disabled={isSaving}
         value={draftPlayer.canonicalPlayerId}
         onChange={(event) => onCanonicalPlayerChange(playerIndex, event.target.value)}
       >
@@ -496,6 +560,7 @@ function PlayerNameCell({
 }
 
 function EditableStatCell({
+  disabled,
   draftValue,
   field,
   formatter = formatValue,
@@ -504,6 +569,7 @@ function EditableStatCell({
   playerIndex,
   value
 }: {
+  disabled: boolean;
   draftValue: string;
   field: EditablePlayerStatField;
   formatter?: (value: number | null | undefined) => string;
@@ -521,7 +587,9 @@ function EditableStatCell({
       <input
         aria-label={field}
         className="stat-input"
+        disabled={disabled}
         inputMode="numeric"
+        min={0}
         type="number"
         value={draftValue}
         onChange={(event) => onDraftChange(playerIndex, field, event.target.value)}
@@ -548,6 +616,7 @@ function toDraftPlayers(players: PlayerStat[]): DraftPlayerStat[] {
 
 function toDraftPlayer(player: PlayerStat): DraftPlayerStat {
   return {
+    id: player.id,
     nickname: player.nickname,
     rawNickname: player.rawNickname,
     canonicalPlayerId: player.canonicalPlayerId === null ? '' : String(player.canonicalPlayerId),
@@ -566,6 +635,7 @@ function fromDraftPlayer(player: DraftPlayerStat, canonicalPlayers: CanonicalPla
   const canonicalPlayer = canonicalPlayers.find((candidate) => candidate.id === canonicalPlayerId);
 
   return {
+    id: player.id,
     nickname: canonicalPlayer?.displayName ?? player.rawNickname ?? player.nickname,
     rawNickname: player.rawNickname,
     canonicalPlayerId,
