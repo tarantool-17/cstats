@@ -123,14 +123,26 @@ WITH seed_aliases (map_key, alias_text, normalized_alias) AS (
     ('de_poseidon', 'de_poseidon', 'deposeidon'),
     ('de_sanctum', 'Sanctum', 'sanctum'),
     ('de_sanctum', 'de_sanctum', 'desanctum')
+),
+deduped_aliases AS (
+  SELECT DISTINCT ON (normalized_alias)
+    map_key,
+    alias_text,
+    normalized_alias
+  FROM seed_aliases
+  ORDER BY
+    normalized_alias,
+    map_key,
+    length(alias_text),
+    alias_text
 )
 INSERT INTO cs2_map_aliases (map_id, alias_text, normalized_alias)
 SELECT
   cs2_maps.id,
-  seed_aliases.alias_text,
-  seed_aliases.normalized_alias
-FROM seed_aliases
-JOIN cs2_maps ON cs2_maps.map_key = seed_aliases.map_key
+  deduped_aliases.alias_text,
+  deduped_aliases.normalized_alias
+FROM deduped_aliases
+JOIN cs2_maps ON cs2_maps.map_key = deduped_aliases.map_key
 ON CONFLICT (normalized_alias) DO UPDATE
 SET
   map_id = EXCLUDED.map_id,
