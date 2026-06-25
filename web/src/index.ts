@@ -19,16 +19,25 @@ type MatchListItem = {
   tScore: number | null;
   duplicateCount: number;
   screenshotCount: number;
-  players: KnownPlayerStat[];
+  players: MatchPlayerStat[];
 };
 
-type KnownPlayerStat = {
+type MatchPlayerStat = {
   nickname: string;
+  rawNickname: string | null;
+  canonicalPlayerId: number | null;
+  canonicalNickname: string | null;
+  team: ScoreboardTeam;
   kills: number | null;
   deaths: number | null;
   assists: number | null;
   headshotPercent: number | null;
   damage: number | null;
+};
+
+type CanonicalPlayer = {
+  id: number;
+  displayName: string;
 };
 
 type RankPlayerStat = {
@@ -40,6 +49,8 @@ type RankPlayerStat = {
   headshotPercent: number | null;
   damage: number;
 };
+
+type ScoreboardTeam = 'CT' | 'T' | 'unknown';
 
 const serverDir = dirname(fileURLToPath(import.meta.url));
 
@@ -84,8 +95,12 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
 
   if (request.method === 'GET' && (url.pathname === '/api/matches' || url.pathname === '/api/images')) {
-    const matches = await listUniqueMatches();
-    sendJson(response, 200, { matches, images: matches });
+    const [matches, canonicalPlayers] = await Promise.all([
+      listUniqueMatches(),
+      listCanonicalPlayers()
+    ]);
+
+    sendJson(response, 200, { matches, images: matches, canonicalPlayers });
     return;
   }
 
@@ -158,7 +173,7 @@ async function listUniqueMatches(): Promise<MatchListItem[]> {
     ORDER BY image_assets.created_at DESC, match_extractions.id DESC
   `);
   const matchIds = result.rows.map((row) => row.id);
-  const playersByMatchId = await listKnownPlayers(matchIds);
+  const playersByMatchId = await listTeamPlayers(matchIds);
 
   return result.rows.map((row) => ({
     id: row.id,
@@ -176,13 +191,18 @@ async function listUniqueMatches(): Promise<MatchListItem[]> {
   }));
 }
 
-async function listKnownPlayers(matchExtractionIds: number[]): Promise<Map<number, KnownPlayerStat[]>> {
+async function listTeamPlayers(matchExtractionIds: number[]): Promise<Map<number, MatchPlayerStat[]>> {
   if (matchExtractionIds.length === 0) {
     return new Map();
   }
 
   const result = await pool.query<{
     match_extraction_id: number;
+    row_number: number;
+    team: ScoreboardTeam;
+    raw_nickname: string | null;
+    canonical_player_id: number | null;
+    canonical_nickname: string | null;
     nickname: string;
     kills: number | null;
     deaths: number | null;
@@ -193,6 +213,11 @@ async function listKnownPlayers(matchExtractionIds: number[]): Promise<Map<numbe
     `
       SELECT
         match_extraction_players.match_extraction_id,
+        match_extraction_players.row_number,
+        match_extraction_players.team,
+        match_extraction_players.raw_nickname,
+        COALESCE(match_player_stats.player_id, known_players.id) AS canonical_player_id,
+        COALESCE(resolved_players.display_name, known_players.display_name) AS canonical_nickname,
         COALESCE(resolved_players.display_name, known_players.display_name, match_extraction_players.raw_nickname, 'unknown') AS nickname,
         match_extraction_players.kills,
         match_extraction_players.deaths,
@@ -205,7 +230,7 @@ async function listKnownPlayers(matchExtractionIds: number[]): Promise<Map<numbe
       LEFT JOIN players AS resolved_players
         ON resolved_players.id = match_player_stats.player_id
       LEFT JOIN LATERAL (
-        SELECT players.display_name
+        SELECT players.id, players.display_name
         FROM players
         LEFT JOIN player_aliases
           ON player_aliases.player_id = players.id
@@ -228,30 +253,82 @@ async function listKnownPlayers(matchExtractionIds: number[]): Promise<Map<numbe
         LIMIT 1
       ) AS known_players ON true
       WHERE match_extraction_players.match_extraction_id = ANY($1::integer[])
-        AND (
-          resolved_players.id IS NOT NULL
-          OR known_players.display_name IS NOT NULL
-        )
       ORDER BY match_extraction_players.match_extraction_id, match_extraction_players.row_number
     `,
     [matchExtractionIds]
   );
 
-  const playersByMatchId = new Map<number, KnownPlayerStat[]>();
+  const extractedPlayersByMatchId = new Map<number, Array<MatchPlayerStat & { rowNumber: number }>>();
   for (const row of result.rows) {
-    const players = playersByMatchId.get(row.match_extraction_id) ?? [];
+    const players = extractedPlayersByMatchId.get(row.match_extraction_id) ?? [];
     players.push({
       nickname: row.nickname,
+      rawNickname: row.raw_nickname,
+      canonicalPlayerId: row.canonical_player_id,
+      canonicalNickname: row.canonical_nickname,
+      team: row.team,
       kills: row.kills,
       deaths: row.deaths,
       assists: row.assists,
       headshotPercent: row.adr_or_kast,
-      damage: row.damage
+      damage: row.damage,
+      rowNumber: row.row_number
     });
-    playersByMatchId.set(row.match_extraction_id, players);
+    extractedPlayersByMatchId.set(row.match_extraction_id, players);
   }
 
-  return playersByMatchId;
+  const teamPlayersByMatchId = new Map<number, MatchPlayerStat[]>();
+  for (const [matchExtractionId, players] of extractedPlayersByMatchId) {
+    const selectedTeam = selectTeamWithKnownPlayers(players);
+    const teamPlayers = selectedTeam
+      ? players.filter((player) => player.team === selectedTeam)
+      : players;
+
+    teamPlayersByMatchId.set(
+      matchExtractionId,
+      teamPlayers.map(({ rowNumber: _rowNumber, ...player }) => player)
+    );
+  }
+
+  return teamPlayersByMatchId;
+}
+
+function selectTeamWithKnownPlayers(
+  players: Array<MatchPlayerStat & { rowNumber: number }>
+): ScoreboardTeam | undefined {
+  const summaries = new Map<ScoreboardTeam, { knownCount: number; rowCount: number; firstRowNumber: number }>();
+
+  for (const player of players) {
+    const summary = summaries.get(player.team) ?? {
+      knownCount: 0,
+      rowCount: 0,
+      firstRowNumber: player.rowNumber
+    };
+
+    summary.knownCount += player.canonicalPlayerId === null ? 0 : 1;
+    summary.rowCount += 1;
+    summary.firstRowNumber = Math.min(summary.firstRowNumber, player.rowNumber);
+    summaries.set(player.team, summary);
+  }
+
+  return [...summaries.entries()].sort((first, second) => (
+    second[1].knownCount - first[1].knownCount
+    || second[1].rowCount - first[1].rowCount
+    || first[1].firstRowNumber - second[1].firstRowNumber
+  ))[0]?.[0];
+}
+
+async function listCanonicalPlayers(): Promise<CanonicalPlayer[]> {
+  const result = await pool.query<{ id: number; display_name: string }>(`
+    SELECT id, display_name
+    FROM players
+    ORDER BY lower(display_name), display_name
+  `);
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    displayName: row.display_name
+  }));
 }
 
 async function listRank(recentOnly: boolean): Promise<RankPlayerStat[]> {

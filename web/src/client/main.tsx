@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useMemo, useState } from 'react';
+import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 
@@ -19,11 +19,20 @@ type MatchListItem = {
 
 type PlayerStat = {
   nickname: string;
+  rawNickname: string | null;
+  canonicalPlayerId: number | null;
+  canonicalNickname: string | null;
+  team: ScoreboardTeam;
   kills: number | null;
   deaths: number | null;
   assists: number | null;
   headshotPercent: number | null;
   damage: number | null;
+};
+
+type CanonicalPlayer = {
+  id: number;
+  displayName: string;
 };
 
 type RankPlayerStat = {
@@ -43,10 +52,15 @@ type RankData = {
 
 type LoadState =
   | { status: 'loading' }
-  | { status: 'loaded'; matches: MatchListItem[]; rank: RankData }
+  | { status: 'loaded'; canonicalPlayers: CanonicalPlayer[]; matches: MatchListItem[]; rank: RankData }
   | { status: 'error'; message: string };
 
 type ActiveTab = 'rank' | 'matches';
+type ScoreboardTeam = 'CT' | 'T' | 'unknown';
+type EditablePlayerStatField = 'kills' | 'deaths' | 'assists' | 'headshotPercent' | 'damage';
+type DraftPlayerStat = Omit<PlayerStat, EditablePlayerStatField | 'canonicalPlayerId'>
+  & Record<EditablePlayerStatField, string>
+  & { canonicalPlayerId: string };
 
 function App() {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
@@ -56,7 +70,7 @@ function App() {
     let ignore = false;
 
     Promise.all([
-      fetchJson<{ matches?: MatchListItem[] }>('/api/matches'),
+      fetchJson<{ canonicalPlayers?: CanonicalPlayer[]; matches?: MatchListItem[] }>('/api/matches'),
       fetchJson<{ rank?: Partial<RankData> }>('/api/rank')
     ])
       .then(([matchesData, rankData]) => {
@@ -66,7 +80,12 @@ function App() {
         };
 
         if (!ignore) {
-          setState({ status: 'loaded', matches: matchesData.matches ?? [], rank });
+          setState({
+            status: 'loaded',
+            canonicalPlayers: matchesData.canonicalPlayers ?? [],
+            matches: matchesData.matches ?? [],
+            rank
+          });
         }
       })
       .catch((error: unknown) => {
@@ -80,21 +99,26 @@ function App() {
     };
   }, []);
 
-  const uniquePlayerCount = useMemo(() => {
-    if (state.status !== 'loaded') {
-      return 0;
-    }
-
-    return new Set(
-      state.matches.flatMap((match) => match.players.map((player) => player.nickname))
-    ).size;
-  }, [state]);
   const title = activeTab === 'rank' ? 'Team Rank' : 'Unique Matches';
+  const handleMatchPlayersSave = (matchId: number, players: PlayerStat[]) => {
+    setState((current) => {
+      if (current.status !== 'loaded') {
+        return current;
+      }
+
+      return {
+        ...current,
+        matches: current.matches.map((match) => (
+          match.id === matchId ? { ...match, players } : match
+        ))
+      };
+    });
+  };
 
   return (
     <main className="app-shell">
       <header className="hero">
-        <div>
+        <div className="hero-title">
           <p className="eyebrow">CStats local dashboard</p>
           <h1>{title}</h1>
         </div>
@@ -116,7 +140,6 @@ function App() {
         </nav>
         <div className="summary-strip" aria-label="Dashboard summary">
           <SummaryItem label="Matches" value={state.status === 'loaded' ? state.matches.length : '...'} />
-          <SummaryItem label="Players" value={state.status === 'loaded' ? uniquePlayerCount : '...'} />
         </div>
       </header>
 
@@ -131,7 +154,12 @@ function App() {
       {state.status === 'loaded' && activeTab === 'matches' && state.matches.length > 0 && (
         <section className="match-list" aria-label="Unique extracted matches">
           {state.matches.map((match) => (
-            <MatchCard key={match.id} match={match} />
+            <MatchCard
+              key={match.id}
+              canonicalPlayers={state.canonicalPlayers}
+              match={match}
+              onPlayersSave={handleMatchPlayersSave}
+            />
           ))}
         </section>
       )}
@@ -212,7 +240,51 @@ function RankTable({ players, title }: { players: RankPlayerStat[]; title: strin
   );
 }
 
-function MatchCard({ match }: { match: MatchListItem }) {
+function MatchCard({
+  canonicalPlayers,
+  match,
+  onPlayersSave
+}: {
+  canonicalPlayers: CanonicalPlayer[];
+  match: MatchListItem;
+  onPlayersSave: (matchId: number, players: PlayerStat[]) => void;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftPlayers, setDraftPlayers] = useState<DraftPlayerStat[]>(() => toDraftPlayers(match.players));
+
+  useEffect(() => {
+    if (!isEditing) {
+      setDraftPlayers(toDraftPlayers(match.players));
+    }
+  }, [isEditing, match.players]);
+
+  const handleEdit = () => {
+    setDraftPlayers(toDraftPlayers(match.players));
+    setIsEditing(true);
+  };
+
+  const handleSave = () => {
+    const savedPlayers = draftPlayers.map((player) => fromDraftPlayer(player, canonicalPlayers));
+    onPlayersSave(match.id, savedPlayers);
+    setIsEditing(false);
+  };
+
+  const handleDraftChange = (
+    playerIndex: number,
+    field: EditablePlayerStatField,
+    value: string
+  ) => {
+    setDraftPlayers((players) => players.map((player, index) => (
+      index === playerIndex ? { ...player, [field]: value } : player
+    )));
+  };
+
+  const handleCanonicalPlayerChange = (playerIndex: number, value: string) => {
+    setDraftPlayers((players) => players.map((player, index) => (
+      index === playerIndex ? { ...player, canonicalPlayerId: value } : player
+    )));
+  };
+
   return (
     <article className="match-card">
       <a className="screenshot-link" href={`/images/${match.imageId}`} target="_blank" rel="noreferrer">
@@ -235,14 +307,31 @@ function MatchCard({ match }: { match: MatchListItem }) {
             <p className="row-kicker">{formatDate(match.imageCreatedAt)}</p>
             <h2>{match.mapName ?? 'Unknown map'}</h2>
           </div>
-          {match.duplicateCount > 0 && (
-            <span className="duplicate-pill">
-              {match.screenshotCount} screenshots, {match.duplicateCount} duplicate
-              {match.duplicateCount === 1 ? '' : 's'} hidden
-            </span>
-          )}
+          <div className="match-actions">
+            {match.duplicateCount > 0 && (
+              <span className="duplicate-pill">
+                {match.screenshotCount} screenshots, {match.duplicateCount} duplicate
+                {match.duplicateCount === 1 ? '' : 's'} hidden
+              </span>
+            )}
+            <button className="secondary-action" type="button" onClick={handleEdit} disabled={isEditing}>
+              Edit
+            </button>
+            {isEditing && (
+              <button className="primary-action" type="button" onClick={handleSave}>
+                Save
+              </button>
+            )}
+          </div>
         </div>
-        <PlayerTable players={match.players} />
+        <PlayerTable
+          canonicalPlayers={canonicalPlayers}
+          draftPlayers={draftPlayers}
+          isEditing={isEditing}
+          onCanonicalPlayerChange={handleCanonicalPlayerChange}
+          onDraftChange={handleDraftChange}
+          players={match.players}
+        />
       </section>
     </article>
   );
@@ -265,11 +354,25 @@ function ScoreChip({
   );
 }
 
-function PlayerTable({ players }: { players: PlayerStat[] }) {
+function PlayerTable({
+  canonicalPlayers,
+  draftPlayers,
+  isEditing,
+  onCanonicalPlayerChange,
+  onDraftChange,
+  players
+}: {
+  canonicalPlayers: CanonicalPlayer[];
+  draftPlayers: DraftPlayerStat[];
+  isEditing: boolean;
+  onCanonicalPlayerChange: (playerIndex: number, value: string) => void;
+  onDraftChange: (playerIndex: number, field: EditablePlayerStatField, value: string) => void;
+  players: PlayerStat[];
+}) {
   if (players.length === 0) {
     return (
       <div className="empty-table">
-        No known team players found in this extraction yet.
+        No team players found in this extraction yet.
       </div>
     );
   }
@@ -288,19 +391,142 @@ function PlayerTable({ players }: { players: PlayerStat[] }) {
           </tr>
         </thead>
         <tbody>
-          {players.map((player, index) => (
-            <tr key={`${player.nickname}-${index}`}>
-              <td className="nickname">{player.nickname}</td>
-              <td>{formatValue(player.kills)}</td>
-              <td>{formatValue(player.deaths)}</td>
-              <td>{formatValue(player.assists)}</td>
-              <td>{formatPercent(player.headshotPercent)}</td>
-              <td>{formatValue(player.damage)}</td>
-            </tr>
-          ))}
+          {players.map((player, index) => {
+            const draftPlayer = draftPlayers[index] ?? toDraftPlayer(player);
+
+            return (
+              <tr key={`${player.nickname}-${index}`}>
+                <PlayerNameCell
+                  canonicalPlayers={canonicalPlayers}
+                  draftPlayer={draftPlayer}
+                  isEditing={isEditing}
+                  onCanonicalPlayerChange={onCanonicalPlayerChange}
+                  player={player}
+                  playerIndex={index}
+                />
+                <EditableStatCell
+                  field="kills"
+                  isEditing={isEditing}
+                  playerIndex={index}
+                  value={player.kills}
+                  draftValue={draftPlayer.kills}
+                  onDraftChange={onDraftChange}
+                />
+                <EditableStatCell
+                  field="deaths"
+                  isEditing={isEditing}
+                  playerIndex={index}
+                  value={player.deaths}
+                  draftValue={draftPlayer.deaths}
+                  onDraftChange={onDraftChange}
+                />
+                <EditableStatCell
+                  field="assists"
+                  isEditing={isEditing}
+                  playerIndex={index}
+                  value={player.assists}
+                  draftValue={draftPlayer.assists}
+                  onDraftChange={onDraftChange}
+                />
+                <EditableStatCell
+                  field="headshotPercent"
+                  isEditing={isEditing}
+                  playerIndex={index}
+                  value={player.headshotPercent}
+                  draftValue={draftPlayer.headshotPercent}
+                  onDraftChange={onDraftChange}
+                  formatter={formatPercent}
+                />
+                <EditableStatCell
+                  field="damage"
+                  isEditing={isEditing}
+                  playerIndex={index}
+                  value={player.damage}
+                  draftValue={draftPlayer.damage}
+                  onDraftChange={onDraftChange}
+                />
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
+  );
+}
+
+function PlayerNameCell({
+  canonicalPlayers,
+  draftPlayer,
+  isEditing,
+  onCanonicalPlayerChange,
+  player,
+  playerIndex
+}: {
+  canonicalPlayers: CanonicalPlayer[];
+  draftPlayer: DraftPlayerStat;
+  isEditing: boolean;
+  onCanonicalPlayerChange: (playerIndex: number, value: string) => void;
+  player: PlayerStat;
+  playerIndex: number;
+}) {
+  if (!isEditing) {
+    return <td className="nickname">{player.nickname}</td>;
+  }
+
+  const extractedName = player.rawNickname ?? player.nickname;
+
+  return (
+    <td className="nickname player-name-cell">
+      <select
+        aria-label={`Canonical player for ${extractedName}`}
+        className="player-select"
+        value={draftPlayer.canonicalPlayerId}
+        onChange={(event) => onCanonicalPlayerChange(playerIndex, event.target.value)}
+      >
+        <option value="">Not attached</option>
+        {canonicalPlayers.map((canonicalPlayer) => (
+          <option key={canonicalPlayer.id} value={canonicalPlayer.id}>
+            {canonicalPlayer.displayName}
+          </option>
+        ))}
+      </select>
+      <span className="raw-nickname">Extracted: {extractedName}</span>
+    </td>
+  );
+}
+
+function EditableStatCell({
+  draftValue,
+  field,
+  formatter = formatValue,
+  isEditing,
+  onDraftChange,
+  playerIndex,
+  value
+}: {
+  draftValue: string;
+  field: EditablePlayerStatField;
+  formatter?: (value: number | null | undefined) => string;
+  isEditing: boolean;
+  onDraftChange: (playerIndex: number, field: EditablePlayerStatField, value: string) => void;
+  playerIndex: number;
+  value: number | null;
+}) {
+  if (!isEditing) {
+    return <td>{formatter(value)}</td>;
+  }
+
+  return (
+    <td>
+      <input
+        aria-label={field}
+        className="stat-input"
+        inputMode="numeric"
+        type="number"
+        value={draftValue}
+        onChange={(event) => onDraftChange(playerIndex, field, event.target.value)}
+      />
+    </td>
   );
 }
 
@@ -314,6 +540,57 @@ function formatValue(value: number | null | undefined) {
 
 function formatPercent(value: number | null | undefined) {
   return value === null || value === undefined ? '-' : `${value}%`;
+}
+
+function toDraftPlayers(players: PlayerStat[]): DraftPlayerStat[] {
+  return players.map(toDraftPlayer);
+}
+
+function toDraftPlayer(player: PlayerStat): DraftPlayerStat {
+  return {
+    nickname: player.nickname,
+    rawNickname: player.rawNickname,
+    canonicalPlayerId: player.canonicalPlayerId === null ? '' : String(player.canonicalPlayerId),
+    canonicalNickname: player.canonicalNickname,
+    team: player.team,
+    kills: toDraftValue(player.kills),
+    deaths: toDraftValue(player.deaths),
+    assists: toDraftValue(player.assists),
+    headshotPercent: toDraftValue(player.headshotPercent),
+    damage: toDraftValue(player.damage)
+  };
+}
+
+function fromDraftPlayer(player: DraftPlayerStat, canonicalPlayers: CanonicalPlayer[]): PlayerStat {
+  const canonicalPlayerId = parseDraftInteger(player.canonicalPlayerId);
+  const canonicalPlayer = canonicalPlayers.find((candidate) => candidate.id === canonicalPlayerId);
+
+  return {
+    nickname: canonicalPlayer?.displayName ?? player.rawNickname ?? player.nickname,
+    rawNickname: player.rawNickname,
+    canonicalPlayerId,
+    canonicalNickname: canonicalPlayer?.displayName ?? null,
+    team: player.team,
+    kills: parseDraftInteger(player.kills),
+    deaths: parseDraftInteger(player.deaths),
+    assists: parseDraftInteger(player.assists),
+    headshotPercent: parseDraftInteger(player.headshotPercent),
+    damage: parseDraftInteger(player.damage)
+  };
+}
+
+function toDraftValue(value: number | null): string {
+  return value === null ? '' : String(value);
+}
+
+function parseDraftInteger(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function formatDate(value: string) {
