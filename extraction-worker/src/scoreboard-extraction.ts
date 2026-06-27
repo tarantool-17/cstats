@@ -36,7 +36,7 @@ export function normalizeScoreboardExtraction(input: unknown): ScoreboardExtract
     mapName: readOptionalString(input.mapName),
     ctScore: readOptionalInteger(input.ctScore),
     tScore: readOptionalInteger(input.tScore),
-    players: playersInput.map(normalizePlayer),
+    players: normalizeScoreboardTeams(playersInput.map(normalizePlayer)),
     confidence: readOptionalNumber(input.confidence),
     warnings: readWarnings(input.warnings)
   };
@@ -92,26 +92,11 @@ export function renderScoreboardNotification(
     return [...header, ...warnings].join('\n');
   }
 
-  const header = [
-    extraction.warnings.length > 0 ? 'Scoreboard extracted with warnings' : 'Scoreboard extracted',
-    `Message: ${job.externalMessageId}`,
-    `Map: ${extraction.mapName ?? 'unknown'}`,
+  return [
+    `Map: ${escapeHtml(extraction.mapName ?? 'unknown')}`,
     `Score: CT ${formatValue(extraction.ctScore)} - T ${formatValue(extraction.tScore)}`,
-    `Confidence: ${formatConfidence(extraction.confidence)}`,
-    `Job: #${job.id}`
-  ];
-
-  const warnings = extraction.warnings.map((warning) => `Warning: ${warning}`);
-  const players = extraction.players.map((player, index) => {
-    return [
-      `${index + 1}. [${player.team}] ${player.rawNickname ?? 'unknown'}`,
-      `K/D/A ${formatValue(player.kills)}/${formatValue(player.deaths)}/${formatValue(player.assists)}`,
-      `ADR/USP ${formatValue(player.adrOrKast)}`,
-      `DMG ${formatValue(player.damage)}`
-    ].join(' | ');
-  });
-
-  return [...header, ...warnings, ...players].join('\n');
+    `<pre>${escapeHtml(renderScoreboardTable(extraction.players))}</pre>`
+  ].join('\n');
 }
 
 export function renderProcessingError(job: ClaimedExtractionJob, error: unknown): string {
@@ -149,6 +134,19 @@ function emptyPlayer(): ScoreboardPlayer {
     adrOrKast: null,
     damage: null
   };
+}
+
+function normalizeScoreboardTeams(players: ScoreboardPlayer[]): ScoreboardPlayer[] {
+  if (players.length !== 10) {
+    return players;
+  }
+
+  return players.map((player, index) => ({
+    ...player,
+    // The extraction contract requires the upper team first. In the CS2 final scoreboard,
+    // those blue rows are CT and the lower yellow rows are T.
+    team: index < 5 ? 'CT' : 'T'
+  }));
 }
 
 function normalizeTeam(value: string | null): ScoreboardTeam {
@@ -252,8 +250,73 @@ function formatConfidence(value: number | null): string {
   return value.toFixed(2);
 }
 
+function renderScoreboardTable(players: ScoreboardPlayer[]): string {
+  const rows = players.map((player, index) => ({
+    number: `${index + 1}.`,
+    team: `[${player.team}]`,
+    nickname: player.rawNickname ?? 'unknown',
+    kills: formatValue(player.kills),
+    deaths: formatValue(player.deaths),
+    assists: formatValue(player.assists),
+    adrOrKast: formatValue(player.adrOrKast),
+    damage: formatValue(player.damage)
+  }));
+
+  const widths = {
+    number: Math.max('#'.length, ...rows.map((row) => row.number.length)),
+    team: Math.max('Team'.length, ...rows.map((row) => row.team.length)),
+    nickname: Math.max('Nickname'.length, ...rows.map((row) => row.nickname.length)),
+    kills: Math.max('Kills'.length, ...rows.map((row) => row.kills.length)),
+    deaths: Math.max('Deaths'.length, ...rows.map((row) => row.deaths.length)),
+    assists: Math.max('Assists'.length, ...rows.map((row) => row.assists.length)),
+    adrOrKast: Math.max('ADR/USP'.length, ...rows.map((row) => row.adrOrKast.length)),
+    damage: Math.max('DMG'.length, ...rows.map((row) => row.damage.length))
+  };
+
+  const header = [
+    '#'.padEnd(widths.number),
+    'Team'.padEnd(widths.team),
+    'Nickname'.padEnd(widths.nickname),
+    'Kills'.padStart(widths.kills),
+    'Deaths'.padStart(widths.deaths),
+    'Assists'.padStart(widths.assists),
+    'ADR/USP'.padStart(widths.adrOrKast),
+    'DMG'.padStart(widths.damage)
+  ].join(' | ');
+  const separator = '-'.repeat(header.length);
+  const lines = [header, separator];
+  let previousTeam: string | null = null;
+
+  for (const row of rows) {
+    if (previousTeam !== null && previousTeam !== row.team) {
+      lines.push(separator);
+    }
+
+    lines.push([
+      row.number.padEnd(widths.number),
+      row.team.padEnd(widths.team),
+      row.nickname.padEnd(widths.nickname),
+      row.kills.padStart(widths.kills),
+      row.deaths.padStart(widths.deaths),
+      row.assists.padStart(widths.assists),
+      row.adrOrKast.padStart(widths.adrOrKast),
+      row.damage.padStart(widths.damage)
+    ].join(' | '));
+    previousTeam = row.team;
+  }
+
+  return lines.join('\n');
+}
+
 function formatValue(value: number | null): string {
   return value === null ? '?' : String(value);
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function formatError(error: unknown): string {

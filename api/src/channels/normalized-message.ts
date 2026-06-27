@@ -4,6 +4,7 @@ export type NormalizedAttachment = {
   kind: 'image';
   providerFileId: string;
   providerUniqueFileId?: string;
+  fileName?: string;
   width?: number;
   height?: number;
   fileSize?: number;

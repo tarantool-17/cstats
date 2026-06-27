@@ -31,6 +31,7 @@ export class TelegramApi {
   sendMessage(chatId: string, text: string, buttons?: OutboundButton[][]): Promise<unknown> {
     return this.call('sendMessage', {
       chat_id: chatId,
+      parse_mode: text.includes('<pre>') ? 'HTML' : undefined,
       text,
       reply_markup: buttons ? { inline_keyboard: buttons.map((row) => row.map((button) => ({
         text: button.text,

@@ -24,7 +24,11 @@ const playerAliasRepository = process.env.DATABASE_URL
   ? new PostgresPlayerAliasRepository(process.env.DATABASE_URL)
   : undefined;
 const commandRouter = new SimpleCommandRouter(playerAliasRepository);
-const ingestionService = new IngestionService(new DiskImageStorage(imageStorageRoot), ingestionRepository);
+const ingestionService = new IngestionService(
+  new DiskImageStorage(imageStorageRoot),
+  ingestionRepository,
+  process.env.MATCH_FILENAME_TIME_ZONE ?? 'Europe/Warsaw'
+);
 const updateHandler = new TelegramUpdateHandler({
   config,
   commandRouter,

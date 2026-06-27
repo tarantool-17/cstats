@@ -15,6 +15,7 @@ const { Pool } = pg;
 export type ClaimedExtractionJob = {
   id: number;
   imageAssetId: number;
+  capturedAt: Date | null;
   relativePath: string;
   sourcePlatform: 'telegram';
   externalChannelId: string;
@@ -63,6 +64,7 @@ export class ExtractionJobRepository {
           SELECT
             extraction_jobs.id,
             extraction_jobs.image_asset_id AS "imageAssetId",
+            image_assets.captured_at AS "capturedAt",
             image_assets.relative_path AS "relativePath",
             source_messages.platform AS "sourcePlatform",
             source_messages.external_channel_id AS "externalChannelId",
@@ -94,6 +96,7 @@ export class ExtractionJobRepository {
         RETURNING
           extraction_jobs.id,
           extraction_jobs.image_asset_id AS "imageAssetId",
+          next_job."capturedAt",
           next_job."relativePath",
           next_job."sourcePlatform",
           next_job."externalChannelId",
@@ -114,7 +117,7 @@ export class ExtractionJobRepository {
 
     try {
       await client.query('BEGIN');
-      const persistence = await upsertScoreboardExtraction(client, job.id, extraction);
+      const persistence = await upsertScoreboardExtraction(client, job, extraction);
       await client.query(
         `
           UPDATE extraction_jobs
@@ -173,7 +176,7 @@ export class ExtractionJobRepository {
 
 async function upsertScoreboardExtraction(
   client: pg.PoolClient,
-  jobId: number,
+  job: ClaimedExtractionJob,
   extraction: ScoreboardExtraction
 ): Promise<ScoreboardPersistenceResult> {
   const mapResolvedExtraction = await resolveScoreboardMapName(client, extraction);
@@ -181,7 +184,7 @@ async function upsertScoreboardExtraction(
     client,
     mapResolvedExtraction
   );
-  const existingMatchExtractionId = await findExistingMatchExtractionIdForJob(client, jobId);
+  const existingMatchExtractionId = await findExistingMatchExtractionIdForJob(client, job.id);
   const fingerprint = buildScoreboardFingerprint(resolvedExtraction);
   const idempotency = await classifyScoreboardIdempotency(
     client,
@@ -190,9 +193,10 @@ async function upsertScoreboardExtraction(
   );
   const matchExtractionId = await upsertMatchExtraction(
     client,
-    jobId,
+    job.id,
     resolvedExtraction,
-    idempotency
+    idempotency,
+    job.capturedAt
   );
 
   await client.query(
@@ -310,7 +314,8 @@ async function upsertMatchExtraction(
   client: pg.PoolClient,
   jobId: number,
   extraction: ScoreboardExtraction,
-  idempotency: ScoreboardIdempotencyResult
+  idempotency: ScoreboardIdempotencyResult,
+  playedAt: Date | null
 ): Promise<number> {
   const result = await client.query<{ id: number }>(
     `
@@ -325,6 +330,7 @@ async function upsertMatchExtraction(
         map_name,
         ct_score,
         t_score,
+        played_at,
         confidence,
         warnings,
         fingerprint_version,
@@ -353,7 +359,8 @@ async function upsertMatchExtraction(
         $12,
         $13,
         $14,
-        $15
+        $15,
+        $16
       FROM target_job
       ON CONFLICT (extraction_job_id) DO UPDATE
       SET
@@ -361,6 +368,7 @@ async function upsertMatchExtraction(
         map_name = EXCLUDED.map_name,
         ct_score = EXCLUDED.ct_score,
         t_score = EXCLUDED.t_score,
+        played_at = COALESCE(match_extractions.played_at, EXCLUDED.played_at),
         confidence = EXCLUDED.confidence,
         warnings = EXCLUDED.warnings,
         fingerprint_version = EXCLUDED.fingerprint_version,
@@ -380,6 +388,7 @@ async function upsertMatchExtraction(
       extraction.mapName,
       extraction.ctScore,
       extraction.tScore,
+      playedAt,
       extraction.confidence,
       extraction.warnings,
       idempotency.fingerprint.version,

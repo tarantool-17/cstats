@@ -106,6 +106,8 @@ const SCOREBOARD_PROMPT = [
   '- Preserve player nicknames exactly as visible.',
   '- Return ten players when the table is readable.',
   '- Put the upper team rows first, then the lower team rows.',
+  '- In a standard ten-player board, the upper blue rows are CT and the lower yellow rows are T.',
+  '- Identify a player side from their scoreboard row; ignore decorative end-screen banners and background text.',
   '- Do not infer a number from score bars, cards, or kill timeline icons.',
   '- Use null and add a warning when any value is unreadable.'
 ].join('\n');

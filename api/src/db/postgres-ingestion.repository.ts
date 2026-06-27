@@ -122,9 +122,12 @@ async function upsertImageAsset(
         sha256,
         width,
         height,
-        mime_type
+        mime_type,
+        source_file_name,
+        telegram_file_path,
+        captured_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       ON CONFLICT (sha256) DO NOTHING
       RETURNING id
     `,
@@ -134,7 +137,10 @@ async function upsertImageAsset(
       image.sha256,
       image.attachment.width,
       image.attachment.height,
-      image.attachment.mimeType
+      image.attachment.mimeType,
+      image.sourceFileName,
+      image.telegramFilePath,
+      image.capturedAt
     ]
   );
 
