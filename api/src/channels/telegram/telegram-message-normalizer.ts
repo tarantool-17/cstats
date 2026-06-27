@@ -36,6 +36,7 @@ function collectAttachments(message: TelegramMessage): NormalizedAttachment[] {
       kind: 'image',
       providerFileId: message.document.file_id,
       providerUniqueFileId: message.document.file_unique_id,
+      fileName: message.document.file_name,
       fileSize: message.document.file_size,
       mimeType: message.document.mime_type
     });

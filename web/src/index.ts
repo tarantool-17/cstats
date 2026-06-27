@@ -14,7 +14,8 @@ type MatchListItem = {
   imageWidth: number | null;
   imageHeight: number | null;
   imageMimeType: string | null;
-  imageCreatedAt: string;
+  playedAt: string;
+  mapKey: string | null;
   mapName: string | null;
   ctScore: number | null;
   tScore: number | null;
@@ -42,14 +43,37 @@ type CanonicalPlayer = {
   displayName: string;
 };
 
+type CanonicalMap = {
+  mapKey: string;
+  displayName: string;
+};
+
 type RankPlayerStat = {
+  canonicalPlayerId: number | null;
   nickname: string;
+  steamAvatarUrl: string | null;
+  steamProfileUrl: string | null;
   matches: number;
   kills: number;
   deaths: number;
   assists: number;
   headshotPercent: number | null;
   damage: number;
+};
+
+type RankMapStat = {
+  mapName: string;
+  matches: number;
+  wins: number;
+  losses: number;
+  kills: number;
+  deaths: number;
+  damage: number;
+};
+
+type RankPeriod = {
+  players: RankPlayerStat[];
+  maps: RankMapStat[];
 };
 
 type ScoreboardTeam = 'CT' | 'T' | 'unknown';
@@ -66,6 +90,14 @@ type SaveMatchPlayerInput = {
   damage: number | null;
 };
 
+type SaveMatchRequest = {
+  ctScore: number | null | undefined;
+  mapKey: string | null | undefined;
+  playedAt: Date | null | undefined;
+  players: SaveMatchPlayerInput[];
+  tScore: number | null | undefined;
+};
+
 const serverDir = dirname(fileURLToPath(import.meta.url));
 
 const config = {
@@ -73,7 +105,9 @@ const config = {
   databaseUrl: requireEnv('DATABASE_URL'),
   host: process.env.WEB_HOST ?? '127.0.0.1',
   imageStorageRoot: resolve(process.env.IMAGE_STORAGE_ROOT ?? '/tmp/cstats/images'),
-  port: readPositiveInt(process.env.WEB_PORT, 1969)
+  port: readPositiveInt(process.env.WEB_PORT, 1969),
+  rankSessionDayStartHour: readIntegerInRange(process.env.RANK_SESSION_DAY_START_HOUR, 12, 0, 23),
+  rankSessionTimeZone: process.env.RANK_SESSION_TIME_ZONE ?? 'Europe/Warsaw'
 };
 
 const pool = new Pool({ connectionString: config.databaseUrl });
@@ -114,12 +148,13 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
 
   if (request.method === 'GET' && (url.pathname === '/api/matches' || url.pathname === '/api/images')) {
-    const [matches, canonicalPlayers] = await Promise.all([
+    const [matches, canonicalPlayers, maps] = await Promise.all([
       listUniqueMatches(),
-      listCanonicalPlayers()
+      listCanonicalPlayers(),
+      listCanonicalMaps()
     ]);
 
-    sendJson(response, 200, { matches, images: matches, canonicalPlayers });
+    sendJson(response, 200, { matches, images: matches, canonicalPlayers, maps });
     return;
   }
 
@@ -131,35 +166,21 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse):
     }
 
     const body = await readJsonBody(request);
-    const players = parseSaveMatchPlayersRequest(body);
-    const savedPlayers = await saveMatchPlayers(matchExtractionId, players);
-    const [allTime, lastThreeMonths] = await Promise.all([
-      listRank(false),
-      listRank(true)
-    ]);
+    const saveRequest = parseSaveMatchRequest(body);
+    const savedMatch = await saveMatch(matchExtractionId, saveRequest);
+    const rank = await listRankData();
 
     sendJson(response, 200, {
-      players: savedPlayers,
-      rank: {
-        allTime,
-        lastThreeMonths
-      }
+      ...savedMatch,
+      rank
     });
     return;
   }
 
   if (request.method === 'GET' && url.pathname === '/api/rank') {
-    const [allTime, lastThreeMonths] = await Promise.all([
-      listRank(false),
-      listRank(true)
-    ]);
+    const rank = await listRankData();
 
-    sendJson(response, 200, {
-      rank: {
-        allTime,
-        lastThreeMonths
-      }
-    });
+    sendJson(response, 200, { rank });
     return;
   }
 
@@ -183,8 +204,9 @@ async function listUniqueMatches(): Promise<MatchListItem[]> {
     image_width: number | null;
     image_height: number | null;
     image_mime_type: string | null;
-    image_created_at: Date;
+    played_at: Date;
     map_name: string | null;
+    map_key: string | null;
     ct_score: number | null;
     t_score: number | null;
     duplicate_count: string | number;
@@ -204,7 +226,8 @@ async function listUniqueMatches(): Promise<MatchListItem[]> {
       image_assets.width AS image_width,
       image_assets.height AS image_height,
       image_assets.mime_type AS image_mime_type,
-      image_assets.created_at AS image_created_at,
+      COALESCE(match_extractions.played_at, image_assets.created_at) AS played_at,
+      cs2_maps.map_key,
       match_extractions.map_name,
       match_extractions.ct_score,
       match_extractions.t_score,
@@ -213,8 +236,9 @@ async function listUniqueMatches(): Promise<MatchListItem[]> {
     FROM match_extractions
     JOIN image_assets ON image_assets.id = match_extractions.image_asset_id
     JOIN grouped_matches ON grouped_matches.canonical_match_id = match_extractions.id
+    LEFT JOIN cs2_maps ON cs2_maps.display_name = match_extractions.map_name
     WHERE match_extractions.duplicate_of_match_extraction_id IS NULL
-    ORDER BY image_assets.created_at DESC, match_extractions.id DESC
+    ORDER BY COALESCE(match_extractions.played_at, image_assets.created_at) DESC, match_extractions.id DESC
   `);
   const matchIds = result.rows.map((row) => row.id);
   const playersByMatchId = await listTeamPlayers(matchIds);
@@ -225,7 +249,8 @@ async function listUniqueMatches(): Promise<MatchListItem[]> {
     imageWidth: row.image_width,
     imageHeight: row.image_height,
     imageMimeType: row.image_mime_type,
-    imageCreatedAt: row.image_created_at.toISOString(),
+    playedAt: row.played_at.toISOString(),
+    mapKey: row.map_key,
     mapName: row.map_name,
     ctScore: row.ct_score,
     tScore: row.t_score,
@@ -326,10 +351,11 @@ async function listTeamPlayers(matchExtractionIds: number[]): Promise<Map<number
 
   const teamPlayersByMatchId = new Map<number, MatchPlayerStat[]>();
   for (const [matchExtractionId, players] of extractedPlayersByMatchId) {
-    const selectedTeam = selectTeamWithKnownPlayers(players);
+    const playersWithEffectiveTeams = normalizeScoreboardTeams(players);
+    const selectedTeam = selectTeamWithKnownPlayers(playersWithEffectiveTeams);
     const teamPlayers = selectedTeam
-      ? players.filter((player) => player.team === selectedTeam)
-      : players;
+      ? playersWithEffectiveTeams.filter((player) => player.team === selectedTeam)
+      : playersWithEffectiveTeams;
 
     teamPlayersByMatchId.set(
       matchExtractionId,
@@ -338,6 +364,24 @@ async function listTeamPlayers(matchExtractionIds: number[]): Promise<Map<number
   }
 
   return teamPlayersByMatchId;
+}
+
+function normalizeScoreboardTeams(
+  players: Array<MatchPlayerStat & { rowNumber: number }>
+): Array<MatchPlayerStat & { rowNumber: number }> {
+  const hasStandardScoreboardLayout = players.length === 10
+    && players.every((player, index) => player.rowNumber === index + 1);
+
+  if (!hasStandardScoreboardLayout) {
+    return players;
+  }
+
+  return players.map((player) => ({
+    ...player,
+    // CS2's final scoreboard lists the blue CT roster first and the yellow T roster second.
+    // This protects results from an OCR model swapping the side labels.
+    team: player.rowNumber <= 5 ? 'CT' : 'T'
+  }));
 }
 
 function selectTeamWithKnownPlayers(
@@ -378,9 +422,63 @@ async function listCanonicalPlayers(): Promise<CanonicalPlayer[]> {
   }));
 }
 
-async function listRank(recentOnly: boolean): Promise<RankPlayerStat[]> {
+async function listCanonicalMaps(): Promise<CanonicalMap[]> {
+  const result = await pool.query<{ map_key: string; display_name: string }>(`
+    SELECT map_key, display_name
+    FROM cs2_maps
+    WHERE is_current_pool = true
+    ORDER BY is_active_duty DESC, lower(display_name), display_name
+  `);
+
+  return result.rows.map((row) => ({
+    mapKey: row.map_key,
+    displayName: row.display_name
+  }));
+}
+
+async function listRankData(): Promise<{
+  allTime: RankPeriod;
+  lastThreeMonths: RankPeriod;
+  lastMeta: RankPeriod;
+}> {
+  const [
+    allTimePlayers,
+    allTimeMaps,
+    lastThreeMonthsPlayers,
+    lastThreeMonthsMaps,
+    lastMetaPlayers,
+    lastMetaMaps
+  ] = await Promise.all([
+    listPlayerRank(null),
+    listMapRank(null),
+    listPlayerRank(3),
+    listMapRank(3),
+    listPlayerRank(null, true),
+    listMapRank(null, true)
+  ]);
+
+  return {
+    allTime: {
+      players: allTimePlayers,
+      maps: allTimeMaps
+    },
+    lastThreeMonths: {
+      players: lastThreeMonthsPlayers,
+      maps: lastThreeMonthsMaps
+    },
+    lastMeta: {
+      players: lastMetaPlayers,
+      maps: lastMetaMaps
+    }
+  };
+}
+
+async function listPlayerRank(months: number | null, latestSessionOnly = false): Promise<RankPlayerStat[]> {
   const result = await pool.query<{
+    canonical_player_id: number | null;
     nickname: string;
+    steam_avatar_url: string | null;
+    steam_profile_url: string | null;
     matches: string | number;
     kills: string | number;
     deaths: string | number;
@@ -389,18 +487,175 @@ async function listRank(recentOnly: boolean): Promise<RankPlayerStat[]> {
     damage: string | number;
   }>(
     `
-      WITH known_match_players AS (
+      WITH latest_rank_session AS (
+        SELECT
+          (
+            (
+              MAX(COALESCE(match_extractions.played_at, image_assets.created_at)) AT TIME ZONE $2
+            ) - ($3::integer * interval '1 hour')
+          )::date AS session_day
+        FROM match_extractions
+        JOIN image_assets
+          ON image_assets.id = match_extractions.image_asset_id
+        WHERE match_extractions.duplicate_of_match_extraction_id IS NULL
+      ),
+      known_match_players AS (
         SELECT
           match_extraction_players.match_extraction_id,
+          COALESCE(
+            resolved_players.id,
+            known_players.id
+          ) AS player_id,
           COALESCE(
             resolved_players.display_name,
             known_players.display_name
           ) AS nickname,
+          COALESCE(
+            resolved_players.steam_avatar_url,
+            known_players.steam_avatar_url
+          ) AS steam_avatar_url,
+          COALESCE(
+            resolved_players.steam_profile_url,
+            known_players.steam_profile_url
+          ) AS steam_profile_url,
           match_extraction_players.kills,
           match_extraction_players.deaths,
           match_extraction_players.assists,
           match_extraction_players.adr_or_kast,
           match_extraction_players.damage
+        FROM match_extraction_players
+        JOIN match_extractions
+          ON match_extractions.id = match_extraction_players.match_extraction_id
+        JOIN image_assets
+          ON image_assets.id = match_extractions.image_asset_id
+        LEFT JOIN match_player_stats
+          ON match_player_stats.match_extraction_player_id = match_extraction_players.id
+        LEFT JOIN players AS resolved_players
+          ON resolved_players.id = match_player_stats.player_id
+        LEFT JOIN LATERAL (
+          SELECT
+            players.id,
+            players.display_name,
+            players.steam_avatar_url,
+            players.steam_profile_url
+          FROM players
+          LEFT JOIN player_aliases
+            ON player_aliases.player_id = players.id
+          WHERE lower(regexp_replace(btrim(players.display_name), '\\s+', ' ', 'g')) =
+              lower(regexp_replace(btrim(coalesce(match_extraction_players.raw_nickname, '')), '\\s+', ' ', 'g'))
+            OR (
+              player_aliases.status IN ('confirmed', 'suggested')
+              AND player_aliases.normalized_alias =
+                lower(regexp_replace(btrim(coalesce(match_extraction_players.raw_nickname, '')), '\\s+', ' ', 'g'))
+            )
+          ORDER BY
+            CASE
+              WHEN lower(regexp_replace(btrim(players.display_name), '\\s+', ' ', 'g')) =
+                lower(regexp_replace(btrim(coalesce(match_extraction_players.raw_nickname, '')), '\\s+', ' ', 'g'))
+                THEN 0
+              WHEN player_aliases.status = 'confirmed' THEN 1
+              ELSE 2
+            END,
+            players.display_name
+          LIMIT 1
+        ) AS known_players ON true
+        WHERE match_extractions.duplicate_of_match_extraction_id IS NULL
+          AND (
+            $1::integer IS NULL
+            OR COALESCE(match_extractions.played_at, image_assets.created_at) >= now() - ($1::integer * interval '1 month')
+          )
+          AND (
+            $4::boolean = false
+            OR (
+              (
+                COALESCE(match_extractions.played_at, image_assets.created_at) AT TIME ZONE $2
+              ) - ($3::integer * interval '1 hour')
+            )::date = (SELECT session_day FROM latest_rank_session)
+          )
+          AND (
+            resolved_players.id IS NOT NULL
+            OR known_players.display_name IS NOT NULL
+          )
+      )
+      SELECT
+        player_id AS canonical_player_id,
+        nickname,
+        steam_avatar_url,
+        steam_profile_url,
+        COUNT(DISTINCT match_extraction_id) AS matches,
+        SUM(COALESCE(kills, 0)) AS kills,
+        SUM(COALESCE(deaths, 0)) AS deaths,
+        SUM(COALESCE(assists, 0)) AS assists,
+        ROUND(AVG(adr_or_kast) FILTER (WHERE adr_or_kast IS NOT NULL)) AS headshot_percent,
+        SUM(COALESCE(damage, 0)) AS damage
+      FROM known_match_players
+      GROUP BY player_id, nickname, steam_avatar_url, steam_profile_url
+      ORDER BY damage DESC, kills DESC, nickname
+    `,
+    [months, config.rankSessionTimeZone, config.rankSessionDayStartHour, latestSessionOnly]
+  );
+
+  return result.rows.map((row) => ({
+    canonicalPlayerId: row.canonical_player_id,
+    nickname: row.nickname,
+    steamAvatarUrl: row.steam_avatar_url,
+    steamProfileUrl: row.steam_profile_url,
+    matches: Number(row.matches),
+    kills: Number(row.kills),
+    deaths: Number(row.deaths),
+    assists: Number(row.assists),
+    headshotPercent: row.headshot_percent === null ? null : Number(row.headshot_percent),
+    damage: Number(row.damage)
+  }));
+}
+
+async function listMapRank(months: number | null, latestSessionOnly = false): Promise<RankMapStat[]> {
+  const result = await pool.query<{
+    map_name: string | null;
+    matches: string | number;
+    wins: string | number;
+    losses: string | number;
+    kills: string | number;
+    deaths: string | number;
+    damage: string | number;
+  }>(
+    `
+      WITH latest_rank_session AS (
+        SELECT
+          (
+            (
+              MAX(COALESCE(match_extractions.played_at, image_assets.created_at)) AT TIME ZONE $2
+            ) - ($3::integer * interval '1 hour')
+          )::date AS session_day
+        FROM match_extractions
+        JOIN image_assets
+          ON image_assets.id = match_extractions.image_asset_id
+        WHERE match_extractions.duplicate_of_match_extraction_id IS NULL
+      ),
+      raw_match_player_rows AS (
+        SELECT
+          match_extractions.id AS match_extraction_id,
+          COALESCE(match_extractions.map_name, 'Unknown map') AS map_name,
+          match_extractions.ct_score,
+          match_extractions.t_score,
+          match_extraction_players.team AS extracted_team,
+          match_extraction_players.row_number,
+          match_extraction_players.kills,
+          match_extraction_players.deaths,
+          match_extraction_players.damage,
+          CASE
+            WHEN resolved_players.id IS NOT NULL OR known_players.display_name IS NOT NULL THEN 1
+            ELSE 0
+          END AS known_count,
+          COUNT(*) OVER (
+            PARTITION BY match_extraction_players.match_extraction_id
+          ) AS extracted_player_count,
+          MIN(match_extraction_players.row_number) OVER (
+            PARTITION BY match_extraction_players.match_extraction_id
+          ) AS first_row_number,
+          MAX(match_extraction_players.row_number) OVER (
+            PARTITION BY match_extraction_players.match_extraction_id
+          ) AS last_row_number
         FROM match_extraction_players
         JOIN match_extractions
           ON match_extractions.id = match_extraction_players.match_extraction_id
@@ -434,43 +689,145 @@ async function listRank(recentOnly: boolean): Promise<RankPlayerStat[]> {
           LIMIT 1
         ) AS known_players ON true
         WHERE match_extractions.duplicate_of_match_extraction_id IS NULL
-          AND ($1::boolean = false OR image_assets.created_at >= now() - interval '3 months')
           AND (
-            resolved_players.id IS NOT NULL
-            OR known_players.display_name IS NOT NULL
+            $1::integer IS NULL
+            OR COALESCE(match_extractions.played_at, image_assets.created_at) >= now() - ($1::integer * interval '1 month')
           )
+          AND (
+            $4::boolean = false
+            OR (
+              (
+                COALESCE(match_extractions.played_at, image_assets.created_at) AT TIME ZONE $2
+              ) - ($3::integer * interval '1 hour')
+            )::date = (SELECT session_day FROM latest_rank_session)
+          )
+      ),
+      match_player_rows AS (
+        SELECT
+          match_extraction_id,
+          map_name,
+          ct_score,
+          t_score,
+          CASE
+            WHEN extracted_player_count = 10
+              AND first_row_number = 1
+              AND last_row_number = 10
+              THEN CASE WHEN row_number <= 5 THEN 'CT' ELSE 'T' END
+            ELSE extracted_team
+          END AS team,
+          row_number,
+          kills,
+          deaths,
+          damage,
+          known_count
+        FROM raw_match_player_rows
+      ),
+      selected_teams AS (
+        SELECT DISTINCT ON (match_extraction_id)
+          match_extraction_id,
+          team
+        FROM (
+          SELECT
+            match_extraction_id,
+            team,
+            SUM(known_count) AS known_player_count,
+            COUNT(*) AS row_count,
+            MIN(row_number) AS first_row_number
+          FROM match_player_rows
+          GROUP BY match_extraction_id, team
+        ) AS team_summaries
+        ORDER BY
+          match_extraction_id,
+          known_player_count DESC,
+          row_count DESC,
+          first_row_number
+      ),
+      selected_match_rows AS (
+        SELECT match_player_rows.*
+        FROM match_player_rows
+        JOIN selected_teams
+          ON selected_teams.match_extraction_id = match_player_rows.match_extraction_id
+          AND selected_teams.team = match_player_rows.team
+        WHERE match_player_rows.team IN ('CT', 'T')
+      ),
+      match_map_stats AS (
+        SELECT
+          match_extraction_id,
+          map_name,
+          team,
+          MAX(ct_score) AS ct_score,
+          MAX(t_score) AS t_score,
+          SUM(COALESCE(kills, 0)) AS kills,
+          SUM(COALESCE(deaths, 0)) AS deaths,
+          SUM(COALESCE(damage, 0)) AS damage
+        FROM selected_match_rows
+        GROUP BY match_extraction_id, map_name, team
       )
       SELECT
-        nickname,
-        COUNT(DISTINCT match_extraction_id) AS matches,
-        SUM(COALESCE(kills, 0)) AS kills,
-        SUM(COALESCE(deaths, 0)) AS deaths,
-        SUM(COALESCE(assists, 0)) AS assists,
-        ROUND(AVG(adr_or_kast) FILTER (WHERE adr_or_kast IS NOT NULL)) AS headshot_percent,
-        SUM(COALESCE(damage, 0)) AS damage
-      FROM known_match_players
-      GROUP BY nickname
-      ORDER BY damage DESC, kills DESC, nickname
+        map_name,
+        COUNT(*) AS matches,
+        COUNT(*) FILTER (
+          WHERE (
+            team = 'CT'
+            AND ct_score IS NOT NULL
+            AND t_score IS NOT NULL
+            AND ct_score > t_score
+          ) OR (
+            team = 'T'
+            AND ct_score IS NOT NULL
+            AND t_score IS NOT NULL
+            AND t_score > ct_score
+          )
+        ) AS wins,
+        COUNT(*) FILTER (
+          WHERE (
+            team = 'CT'
+            AND ct_score IS NOT NULL
+            AND t_score IS NOT NULL
+            AND ct_score < t_score
+          ) OR (
+            team = 'T'
+            AND ct_score IS NOT NULL
+            AND t_score IS NOT NULL
+            AND t_score < ct_score
+          )
+        ) AS losses,
+        SUM(kills) AS kills,
+        SUM(deaths) AS deaths,
+        SUM(damage) AS damage
+      FROM match_map_stats
+      GROUP BY map_name
+      ORDER BY damage DESC, wins DESC, map_name
     `,
-    [recentOnly]
+    [months, config.rankSessionTimeZone, config.rankSessionDayStartHour, latestSessionOnly]
   );
 
   return result.rows.map((row) => ({
-    nickname: row.nickname,
+    mapName: row.map_name ?? 'Unknown map',
     matches: Number(row.matches),
+    wins: Number(row.wins),
+    losses: Number(row.losses),
     kills: Number(row.kills),
     deaths: Number(row.deaths),
-    assists: Number(row.assists),
-    headshotPercent: row.headshot_percent === null ? null : Number(row.headshot_percent),
     damage: Number(row.damage)
   }));
 }
 
-async function saveMatchPlayers(
+async function saveMatch(
   matchExtractionId: number,
-  players: SaveMatchPlayerInput[]
-): Promise<MatchPlayerStat[]> {
+  request: SaveMatchRequest
+): Promise<{
+  ctScore: number | null;
+  mapKey: string | null;
+  mapName: string | null;
+  playedAt: string;
+  players: MatchPlayerStat[];
+  tScore: number | null;
+}> {
   const client = await pool.connect();
+  let savedMap: { mapKey: string | null; mapName: string | null };
+  let savedPlayedAt: Date;
+  let savedScore: { ctScore: number | null; tScore: number | null };
 
   try {
     await client.query('BEGIN');
@@ -489,8 +846,24 @@ async function saveMatchPlayers(
       throw new HttpError(404, 'Match not found');
     }
 
-    if (players.length > 0) {
-      await saveMatchPlayerRows(client, matchExtractionId, players);
+    const currentMatch = await findMatchMetadata(client, matchExtractionId);
+    savedMap = request.mapKey === undefined
+      ? currentMatch
+      : await updateMatchMap(client, matchExtractionId, request.mapKey);
+    savedPlayedAt = request.playedAt === undefined
+      ? currentMatch.playedAt
+      : await updateMatchPlayedAt(client, matchExtractionId, request.playedAt, currentMatch.imageCreatedAt);
+    savedScore = request.ctScore === undefined && request.tScore === undefined
+      ? currentMatch
+      : await updateMatchScore(
+        client,
+        matchExtractionId,
+        request.ctScore === undefined ? currentMatch.ctScore : request.ctScore,
+        request.tScore === undefined ? currentMatch.tScore : request.tScore
+      );
+
+    if (request.players.length > 0) {
+      await saveMatchPlayerRows(client, matchExtractionId, request.players);
     }
 
     await client.query('COMMIT');
@@ -501,7 +874,154 @@ async function saveMatchPlayers(
     client.release();
   }
 
-  return (await listTeamPlayers([matchExtractionId])).get(matchExtractionId) ?? [];
+  return {
+    ...savedScore!,
+    ...savedMap!,
+    playedAt: savedPlayedAt!.toISOString(),
+    players: (await listTeamPlayers([matchExtractionId])).get(matchExtractionId) ?? []
+  };
+}
+
+async function updateMatchScore(
+  client: pg.PoolClient,
+  matchExtractionId: number,
+  ctScore: number | null,
+  tScore: number | null
+): Promise<{ ctScore: number | null; tScore: number | null }> {
+  const result = await client.query<{ ct_score: number | null; t_score: number | null }>(
+    `
+      UPDATE match_extractions
+      SET
+        ct_score = $2,
+        t_score = $3,
+        updated_at = now()
+      WHERE id = $1
+      RETURNING ct_score, t_score
+    `,
+    [matchExtractionId, ctScore, tScore]
+  );
+
+  return {
+    ctScore: result.rows[0]?.ct_score ?? null,
+    tScore: result.rows[0]?.t_score ?? null
+  };
+}
+
+async function updateMatchPlayedAt(
+  client: pg.PoolClient,
+  matchExtractionId: number,
+  playedAt: Date | null,
+  fallbackPlayedAt: Date
+): Promise<Date> {
+  const result = await client.query<{ played_at: Date | null }>(
+    `
+      UPDATE match_extractions
+      SET
+        played_at = $2,
+        updated_at = now()
+      WHERE id = $1
+      RETURNING played_at
+    `,
+    [matchExtractionId, playedAt]
+  );
+
+  return result.rows[0]?.played_at ?? fallbackPlayedAt;
+}
+
+async function updateMatchMap(
+  client: pg.PoolClient,
+  matchExtractionId: number,
+  mapKey: string | null
+): Promise<{ mapKey: string | null; mapName: string | null }> {
+  if (mapKey === null) {
+    await client.query(
+      `
+        UPDATE match_extractions
+        SET
+          map_name = NULL,
+          updated_at = now()
+        WHERE id = $1
+      `,
+      [matchExtractionId]
+    );
+
+    return { mapKey: null, mapName: null };
+  }
+
+  const mapResult = await client.query<{ map_key: string; display_name: string }>(
+    `
+      SELECT map_key, display_name
+      FROM cs2_maps
+      WHERE map_key = $1
+        AND is_current_pool = true
+      LIMIT 1
+    `,
+    [mapKey]
+  );
+  const map = mapResult.rows[0];
+  if (!map) {
+    throw new HttpError(400, 'Selected map does not exist');
+  }
+
+  await client.query(
+    `
+      UPDATE match_extractions
+      SET
+        map_name = $2,
+        updated_at = now()
+      WHERE id = $1
+    `,
+    [matchExtractionId, map.display_name]
+  );
+
+  return { mapKey: map.map_key, mapName: map.display_name };
+}
+
+async function findMatchMetadata(
+  client: pg.PoolClient,
+  matchExtractionId: number
+): Promise<{
+  ctScore: number | null;
+  mapKey: string | null;
+  mapName: string | null;
+  playedAt: Date;
+  imageCreatedAt: Date;
+  tScore: number | null;
+}> {
+  const result = await client.query<{
+    ct_score: number | null;
+    map_key: string | null;
+    map_name: string | null;
+    played_at: Date | null;
+    image_created_at: Date;
+    t_score: number | null;
+  }>(
+    `
+      SELECT
+        match_extractions.ct_score,
+        cs2_maps.map_key,
+        match_extractions.map_name,
+        match_extractions.played_at,
+        image_assets.created_at AS image_created_at,
+        match_extractions.t_score
+      FROM match_extractions
+      JOIN image_assets ON image_assets.id = match_extractions.image_asset_id
+      LEFT JOIN cs2_maps ON cs2_maps.display_name = match_extractions.map_name
+      WHERE match_extractions.id = $1
+      LIMIT 1
+    `,
+    [matchExtractionId]
+  );
+  const match = result.rows[0];
+
+  return {
+    ctScore: match?.ct_score ?? null,
+    mapKey: match?.map_key ?? null,
+    mapName: match?.map_name ?? null,
+    playedAt: match?.played_at ?? match?.image_created_at ?? new Date(0),
+    imageCreatedAt: match?.image_created_at ?? new Date(0),
+    tScore: match?.t_score ?? null
+  };
 }
 
 async function saveMatchPlayerRows(
@@ -851,40 +1371,88 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   }
 }
 
-function parseSaveMatchPlayersRequest(body: unknown): SaveMatchPlayerInput[] {
+function parseSaveMatchRequest(body: unknown): SaveMatchRequest {
   if (!isRecord(body) || !Array.isArray(body.players)) {
     throw new HttpError(400, 'Expected a players array');
   }
 
   const seenIds = new Set<number>();
+  const mapKey = Object.hasOwn(body, 'mapKey')
+    ? readNullableString(body.mapKey, 'mapKey')
+    : undefined;
+  const playedAt = Object.hasOwn(body, 'playedAt')
+    ? readNullableDate(body.playedAt, 'playedAt')
+    : undefined;
+  const ctScore = Object.hasOwn(body, 'ctScore')
+    ? readNullableNonNegativeInteger(body.ctScore, 'ctScore')
+    : undefined;
+  const tScore = Object.hasOwn(body, 'tScore')
+    ? readNullableNonNegativeInteger(body.tScore, 'tScore')
+    : undefined;
 
-  return body.players.map((player, index) => {
-    if (!isRecord(player)) {
-      throw new HttpError(400, `players[${index}] must be an object`);
-    }
+  return {
+    ctScore,
+    mapKey,
+    playedAt,
+    players: body.players.map((player, index) => {
+      if (!isRecord(player)) {
+        throw new HttpError(400, `players[${index}] must be an object`);
+      }
 
-    const id = readPositiveInteger(player.id, `players[${index}].id`);
-    if (seenIds.has(id)) {
-      throw new HttpError(400, `players[${index}].id is duplicated`);
-    }
-    seenIds.add(id);
+      const id = readPositiveInteger(player.id, `players[${index}].id`);
+      if (seenIds.has(id)) {
+        throw new HttpError(400, `players[${index}].id is duplicated`);
+      }
+      seenIds.add(id);
 
-    return {
-      id,
-      canonicalPlayerId: readNullablePositiveInteger(
-        player.canonicalPlayerId,
-        `players[${index}].canonicalPlayerId`
-      ),
-      kills: readNullableNonNegativeInteger(player.kills, `players[${index}].kills`),
-      deaths: readNullableNonNegativeInteger(player.deaths, `players[${index}].deaths`),
-      assists: readNullableNonNegativeInteger(player.assists, `players[${index}].assists`),
-      headshotPercent: readNullableNonNegativeInteger(
-        player.headshotPercent,
-        `players[${index}].headshotPercent`
-      ),
-      damage: readNullableNonNegativeInteger(player.damage, `players[${index}].damage`)
-    };
-  });
+      return {
+        id,
+        canonicalPlayerId: readNullablePositiveInteger(
+          player.canonicalPlayerId,
+          `players[${index}].canonicalPlayerId`
+        ),
+        kills: readNullableNonNegativeInteger(player.kills, `players[${index}].kills`),
+        deaths: readNullableNonNegativeInteger(player.deaths, `players[${index}].deaths`),
+        assists: readNullableNonNegativeInteger(player.assists, `players[${index}].assists`),
+        headshotPercent: readNullableNonNegativeInteger(
+          player.headshotPercent,
+          `players[${index}].headshotPercent`
+        ),
+        damage: readNullableNonNegativeInteger(player.damage, `players[${index}].damage`)
+      };
+    }),
+    tScore
+  };
+}
+
+function readNullableString(value: unknown, field: string): string | null {
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value !== 'string') {
+    throw new HttpError(400, `${field} must be a string or null`);
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
+}
+
+function readNullableDate(value: unknown, field: string): Date | null {
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value !== 'string') {
+    throw new HttpError(400, `${field} must be an ISO date-time string or null`);
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new HttpError(400, `${field} must be a valid date-time`);
+  }
+
+  return parsed;
 }
 
 function readPositiveInteger(value: unknown, field: string): number {
@@ -981,6 +1549,15 @@ function readPositiveInt(value: string | undefined, fallback: number): number {
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readIntegerInRange(value: string | undefined, fallback: number, min: number, max: number): number {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
 }
 
 function formatError(error: unknown): string {

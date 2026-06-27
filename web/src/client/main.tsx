@@ -8,7 +8,8 @@ type MatchListItem = {
   imageWidth: number | null;
   imageHeight: number | null;
   imageMimeType: string | null;
-  imageCreatedAt: string;
+  playedAt: string;
+  mapKey: string | null;
   mapName: string | null;
   ctScore: number | null;
   tScore: number | null;
@@ -36,8 +37,16 @@ type CanonicalPlayer = {
   displayName: string;
 };
 
+type CanonicalMap = {
+  mapKey: string;
+  displayName: string;
+};
+
 type RankPlayerStat = {
+  canonicalPlayerId: number | null;
   nickname: string;
+  steamAvatarUrl: string | null;
+  steamProfileUrl: string | null;
   matches: number;
   kills: number;
   deaths: number;
@@ -46,24 +55,60 @@ type RankPlayerStat = {
   damage: number;
 };
 
+type RankMapStat = {
+  mapName: string;
+  matches: number;
+  wins: number;
+  losses: number;
+  kills: number;
+  deaths: number;
+  damage: number;
+};
+
+type RankPeriodData = {
+  players: RankPlayerStat[];
+  maps: RankMapStat[];
+};
+
+type RankPeriodKey = 'allTime' | 'lastThreeMonths' | 'lastMeta';
+
 type RankData = {
-  allTime: RankPlayerStat[];
-  lastThreeMonths: RankPlayerStat[];
+  allTime: RankPeriodData;
+  lastThreeMonths: RankPeriodData;
+  lastMeta: RankPeriodData;
 };
 
 type SaveMatchPlayersResponse = {
+  ctScore: number | null;
+  mapKey: string | null;
+  mapName: string | null;
+  playedAt: string;
   players: PlayerStat[];
   rank: RankData;
+  tScore: number | null;
 };
 
 type LoadState =
   | { status: 'loading' }
-  | { status: 'loaded'; canonicalPlayers: CanonicalPlayer[]; matches: MatchListItem[]; rank: RankData }
+  | {
+      status: 'loaded';
+      canonicalPlayers: CanonicalPlayer[];
+      maps: CanonicalMap[];
+      matches: MatchListItem[];
+      rank: RankData;
+    }
   | { status: 'error'; message: string };
 
 type ActiveTab = 'rank' | 'matches';
 type ScoreboardTeam = 'CT' | 'T' | 'unknown';
 type EditablePlayerStatField = 'kills' | 'deaths' | 'assists' | 'headshotPercent' | 'damage';
+type MatchOutcome = { label: string; status: 'draw' | 'lost' | 'won' };
+const PRESERVE_CURRENT_MAP_KEY = '__preserve_current_map__';
+const RANK_PERIODS: Array<{ key: RankPeriodKey; label: string }> = [
+  { key: 'allTime', label: 'All Time' },
+  { key: 'lastThreeMonths', label: '3 Months' },
+  { key: 'lastMeta', label: 'Last Meta' }
+];
 type DraftPlayerStat = Omit<PlayerStat, EditablePlayerStatField | 'canonicalPlayerId'>
   & Record<EditablePlayerStatField, string>
   & { canonicalPlayerId: string };
@@ -76,21 +121,21 @@ function App() {
     let ignore = false;
 
     Promise.all([
-      fetchJson<{ canonicalPlayers?: CanonicalPlayer[]; matches?: MatchListItem[] }>('/api/matches'),
+      fetchJson<{
+        canonicalPlayers?: CanonicalPlayer[];
+        maps?: CanonicalMap[];
+        matches?: MatchListItem[];
+      }>('/api/matches'),
       fetchJson<{ rank?: Partial<RankData> }>('/api/rank')
     ])
       .then(([matchesData, rankData]) => {
-        const rank = {
-          allTime: rankData.rank?.allTime ?? [],
-          lastThreeMonths: rankData.rank?.lastThreeMonths ?? []
-        };
-
         if (!ignore) {
           setState({
             status: 'loaded',
             canonicalPlayers: matchesData.canonicalPlayers ?? [],
+            maps: matchesData.maps ?? [],
             matches: matchesData.matches ?? [],
-            rank
+            rank: normalizeRankData(rankData.rank)
           });
         }
       })
@@ -105,10 +150,16 @@ function App() {
     };
   }, []);
 
-  const title = activeTab === 'rank' ? 'Team Rank' : 'Unique Matches';
-  const handleMatchPlayersSave = async (matchId: number, players: PlayerStat[]) => {
+  const handleMatchPlayersSave = async (
+    matchId: number,
+    mapKey: string | null | undefined,
+    playedAt: string,
+    ctScore: number | null,
+    tScore: number | null,
+    players: PlayerStat[]
+  ) => {
     const result = await fetchJson<SaveMatchPlayersResponse>(`/api/matches/${matchId}/players`, {
-      body: JSON.stringify({ players }),
+      body: JSON.stringify({ ctScore, mapKey, playedAt, players, tScore }),
       headers: { 'Content-Type': 'application/json' },
       method: 'PUT'
     });
@@ -122,7 +173,17 @@ function App() {
         ...current,
         rank: result.rank,
         matches: current.matches.map((match) => (
-          match.id === matchId ? { ...match, players: result.players } : match
+          match.id === matchId
+            ? {
+              ...match,
+              ctScore: result.ctScore,
+              mapKey: result.mapKey,
+              mapName: result.mapName,
+              playedAt: result.playedAt,
+              players: result.players,
+              tScore: result.tScore
+            }
+            : match
         ))
       };
     });
@@ -133,10 +194,6 @@ function App() {
   return (
     <main className="app-shell">
       <header className="hero">
-        <div className="hero-title">
-          <p className="eyebrow">CStats local dashboard</p>
-          <h1>{title}</h1>
-        </div>
         <nav className="top-nav" aria-label="Primary">
           <button
             className={activeTab === 'rank' ? 'active' : ''}
@@ -153,9 +210,6 @@ function App() {
             Matches
           </button>
         </nav>
-        <div className="summary-strip" aria-label="Dashboard summary">
-          <SummaryItem label="Matches" value={state.status === 'loaded' ? state.matches.length : '...'} />
-        </div>
       </header>
 
       {state.status === 'loading' && <Status message="Loading extracted matches..." />}
@@ -172,6 +226,7 @@ function App() {
             <MatchCard
               key={match.id}
               canonicalPlayers={state.canonicalPlayers}
+              maps={state.maps}
               match={match}
               onPlayersSave={handleMatchPlayersSave}
             />
@@ -180,6 +235,21 @@ function App() {
       )}
     </main>
   );
+}
+
+function normalizeRankData(rank: Partial<RankData> | undefined): RankData {
+  return {
+    allTime: normalizeRankPeriod(rank?.allTime),
+    lastThreeMonths: normalizeRankPeriod(rank?.lastThreeMonths),
+    lastMeta: normalizeRankPeriod(rank?.lastMeta)
+  };
+}
+
+function normalizeRankPeriod(period: Partial<RankPeriodData> | undefined): RankPeriodData {
+  return {
+    players: period?.players ?? [],
+    maps: period?.maps ?? []
+  };
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -200,39 +270,58 @@ async function readResponseError(response: Response, fallback: string): Promise<
   }
 }
 
-function SummaryItem({ label, value }: { label: string; value: number | string }) {
-  return (
-    <div className="summary-item">
-      <span className="summary-value">{value}</span>
-      <span className="summary-label">{label}</span>
-    </div>
-  );
-}
-
 function RankView({ rank }: { rank: RankData }) {
+  const [activePeriodKey, setActivePeriodKey] = useState<RankPeriodKey>('allTime');
+  const activePeriod = RANK_PERIODS.find((period) => period.key === activePeriodKey) ?? RANK_PERIODS[0];
+
   return (
     <section className="rank-grid" aria-label="Player rankings">
-      <RankTable title="All Time" players={rank.allTime} />
-      <RankTable title="Last 3 Months" players={rank.lastThreeMonths} />
+      <div className="rank-sub-tabs" role="tablist" aria-label="Rank period">
+        {RANK_PERIODS.map((period) => (
+          <button
+            key={period.key}
+            aria-controls="rank-period-panel"
+            aria-selected={period.key === activePeriodKey}
+            className={period.key === activePeriodKey ? 'active' : ''}
+            id={`rank-period-tab-${period.key}`}
+            role="tab"
+            type="button"
+            onClick={() => setActivePeriodKey(period.key)}
+          >
+            {period.label}
+          </button>
+        ))}
+      </div>
+      <RankPeriod
+        period={rank[activePeriod.key]}
+        tabId={`rank-period-tab-${activePeriod.key}`}
+      />
     </section>
   );
 }
 
-function RankTable({ players, title }: { players: RankPlayerStat[]; title: string }) {
+function RankPeriod({ period, tabId }: { period: RankPeriodData; tabId: string }) {
+  return (
+    <section
+      aria-labelledby={tabId}
+      className="rank-period"
+      id="rank-period-panel"
+      role="tabpanel"
+    >
+      <RankTable players={period.players} />
+      <MapRankTable maps={period.maps} />
+    </section>
+  );
+}
+
+function RankTable({ players }: { players: RankPlayerStat[] }) {
   return (
     <article className="rank-panel">
-      <div className="rank-title-row">
-        <div>
-          <p className="row-kicker">Sorted by Урон</p>
-          <h2>{title}</h2>
-        </div>
-        <span className="rank-count">{players.length} players</span>
-      </div>
       {players.length === 0 ? (
         <div className="empty-table">No player stats yet.</div>
       ) : (
         <div className="table-wrap">
-          <table>
+          <table className="player-rank-table">
             <thead>
               <tr>
                 <th>Никнейм</th>
@@ -246,8 +335,10 @@ function RankTable({ players, title }: { players: RankPlayerStat[]; title: strin
             </thead>
             <tbody>
               {players.map((player) => (
-                <tr key={player.nickname}>
-                  <td className="nickname">{player.nickname}</td>
+                <tr key={player.canonicalPlayerId ?? player.nickname}>
+                  <td className="nickname">
+                    <RankPlayerCell player={player} />
+                  </td>
                   <td>{formatValue(player.matches)}</td>
                   <td>{formatValue(player.kills)}</td>
                   <td>{formatValue(player.deaths)}</td>
@@ -264,45 +355,154 @@ function RankTable({ players, title }: { players: RankPlayerStat[]; title: strin
   );
 }
 
+function RankPlayerCell({ player }: { player: RankPlayerStat }) {
+  const steamProfileUrl = getSafeSteamProfileUrl(player.steamProfileUrl);
+  const content = (
+    <span className="rank-player">
+      {player.steamAvatarUrl ? (
+        <img
+          className="rank-avatar"
+          src={player.steamAvatarUrl}
+          alt=""
+          loading="lazy"
+          referrerPolicy="no-referrer"
+        />
+      ) : (
+        <span className="rank-avatar placeholder" aria-hidden="true">
+          {getPlayerInitial(player.nickname)}
+        </span>
+      )}
+      <span className="rank-player-name">{player.nickname}</span>
+    </span>
+  );
+
+  return steamProfileUrl ? (
+    <a className="rank-player-link" href={steamProfileUrl} target="_blank" rel="noreferrer">
+      {content}
+    </a>
+  ) : content;
+}
+
+function MapRankTable({ maps }: { maps: RankMapStat[] }) {
+  return (
+    <article className="rank-panel map-rank-panel">
+      {maps.length === 0 ? (
+        <div className="empty-table">No map stats yet.</div>
+      ) : (
+        <div className="table-wrap">
+          <table className="map-rank-table">
+            <thead>
+              <tr>
+                <th>Карта</th>
+                <th>Матчи</th>
+                <th>Победы</th>
+                <th>Поражения</th>
+                <th>Убийства</th>
+                <th>Смерти</th>
+                <th>Урон</th>
+              </tr>
+            </thead>
+            <tbody>
+              {maps.map((map) => (
+                <tr key={map.mapName}>
+                  <td className="nickname">{map.mapName}</td>
+                  <td>{formatValue(map.matches)}</td>
+                  <td>{formatValue(map.wins)}</td>
+                  <td>{formatValue(map.losses)}</td>
+                  <td>{formatValue(map.kills)}</td>
+                  <td>{formatValue(map.deaths)}</td>
+                  <td>{formatValue(map.damage)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </article>
+  );
+}
+
 function MatchCard({
   canonicalPlayers,
+  maps,
   match,
   onPlayersSave
 }: {
   canonicalPlayers: CanonicalPlayer[];
+  maps: CanonicalMap[];
   match: MatchListItem;
-  onPlayersSave: (matchId: number, players: PlayerStat[]) => Promise<PlayerStat[]>;
+  onPlayersSave: (
+    matchId: number,
+    mapKey: string | null | undefined,
+    playedAt: string,
+    ctScore: number | null,
+    tScore: number | null,
+    players: PlayerStat[]
+  ) => Promise<PlayerStat[]>;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [draftCtScore, setDraftCtScore] = useState(() => toDraftValue(match.ctScore));
+  const [draftMapKey, setDraftMapKey] = useState(() => toDraftMapKey(match));
+  const [draftPlayedAt, setDraftPlayedAt] = useState(() => toDateTimeLocalValue(match.playedAt));
   const [draftPlayers, setDraftPlayers] = useState<DraftPlayerStat[]>(() => toDraftPlayers(match.players));
+  const [draftTScore, setDraftTScore] = useState(() => toDraftValue(match.tScore));
+  const matchOutcome = getMatchOutcome(match);
 
   useEffect(() => {
     if (!isEditing) {
+      setDraftCtScore(toDraftValue(match.ctScore));
+      setDraftMapKey(toDraftMapKey(match));
+      setDraftPlayedAt(toDateTimeLocalValue(match.playedAt));
       setDraftPlayers(toDraftPlayers(match.players));
+      setDraftTScore(toDraftValue(match.tScore));
     }
-  }, [isEditing, match.players]);
+  }, [isEditing, match, match.players]);
 
   const handleEdit = () => {
+    setDraftCtScore(toDraftValue(match.ctScore));
+    setDraftMapKey(toDraftMapKey(match));
+    setDraftPlayedAt(toDateTimeLocalValue(match.playedAt));
     setDraftPlayers(toDraftPlayers(match.players));
+    setDraftTScore(toDraftValue(match.tScore));
     setSaveError(null);
     setIsEditing(true);
   };
 
   const handleCancel = () => {
+    setDraftCtScore(toDraftValue(match.ctScore));
+    setDraftMapKey(toDraftMapKey(match));
+    setDraftPlayedAt(toDateTimeLocalValue(match.playedAt));
     setDraftPlayers(toDraftPlayers(match.players));
+    setDraftTScore(toDraftValue(match.tScore));
     setSaveError(null);
     setIsEditing(false);
   };
 
   const handleSave = async () => {
     const savedPlayers = draftPlayers.map((player) => fromDraftPlayer(player, canonicalPlayers));
+    const playedAt = new Date(draftPlayedAt);
+
+    if (!draftPlayedAt || Number.isNaN(playedAt.getTime())) {
+      setSaveError('Enter a valid match date and time.');
+      return;
+    }
 
     setIsSaving(true);
     setSaveError(null);
     try {
-      const refreshedPlayers = await onPlayersSave(match.id, savedPlayers);
+      const mapKey = draftMapKey === PRESERVE_CURRENT_MAP_KEY
+        ? undefined
+        : draftMapKey || null;
+      const refreshedPlayers = await onPlayersSave(
+        match.id,
+        mapKey,
+        playedAt.toISOString(),
+        parseDraftInteger(draftCtScore),
+        parseDraftInteger(draftTScore),
+        savedPlayers
+      );
       setDraftPlayers(toDraftPlayers(refreshedPlayers));
       setIsEditing(false);
     } catch (error) {
@@ -336,19 +536,74 @@ function MatchCard({
           alt={`Scoreboard screenshot for ${match.mapName ?? 'unknown map'}`}
           loading="lazy"
         />
+        {matchOutcome && (
+          <span className={`match-outcome ${matchOutcome.status}`}>
+            {matchOutcome.label}
+          </span>
+        )}
         <span className="image-open">Open image</span>
       </a>
 
       <div className="score-stack" aria-label="Match score">
-        <ScoreChip label="CT" value={match.ctScore} accent="ct" />
-        <ScoreChip label="T" value={match.tScore} accent="t" />
+        <ScoreChip
+          accent="ct"
+          disabled={isSaving}
+          draftValue={draftCtScore}
+          isEditing={isEditing}
+          label="CT"
+          onDraftChange={setDraftCtScore}
+          value={match.ctScore}
+        />
+        <ScoreChip
+          accent="t"
+          disabled={isSaving}
+          draftValue={draftTScore}
+          isEditing={isEditing}
+          label="T"
+          onDraftChange={setDraftTScore}
+          value={match.tScore}
+        />
       </div>
 
       <section className="match-detail">
         <div className="match-title-row">
           <div>
-            <p className="row-kicker">{formatDate(match.imageCreatedAt)}</p>
-            <h2>{match.mapName ?? 'Unknown map'}</h2>
+            {isEditing ? (
+              <input
+                aria-label="Match date and time"
+                className="match-date-input"
+                disabled={isSaving}
+                onChange={(event) => setDraftPlayedAt(event.target.value)}
+                required
+                type="datetime-local"
+                value={draftPlayedAt}
+              />
+            ) : (
+              <p className="row-kicker">{formatDate(match.playedAt)}</p>
+            )}
+            {isEditing ? (
+              <select
+                aria-label="Match map"
+                className="map-select"
+                disabled={isSaving}
+                value={draftMapKey}
+                onChange={(event) => setDraftMapKey(event.target.value)}
+              >
+                {match.mapKey === null && match.mapName && (
+                  <option value={PRESERVE_CURRENT_MAP_KEY}>
+                    Current: {match.mapName}
+                  </option>
+                )}
+                <option value="">Unknown map</option>
+                {maps.map((map) => (
+                  <option key={map.mapKey} value={map.mapKey}>
+                    {map.displayName}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <h2>{match.mapName ?? 'Unknown map'}</h2>
+            )}
           </div>
           <div className="match-actions">
             {match.duplicateCount > 0 && (
@@ -389,17 +644,38 @@ function MatchCard({
 
 function ScoreChip({
   accent,
+  disabled,
+  draftValue,
+  isEditing,
   label,
+  onDraftChange,
   value
 }: {
   accent: 'ct' | 't';
+  disabled: boolean;
+  draftValue: string;
+  isEditing: boolean;
   label: string;
+  onDraftChange: (value: string) => void;
   value: number | null;
 }) {
   return (
     <div className={`score-chip ${accent}`}>
       <span className="score-label">{label}</span>
-      <strong>{formatValue(value)}</strong>
+      {isEditing ? (
+        <input
+          aria-label={`${label} score`}
+          className="score-input"
+          disabled={disabled}
+          inputMode="numeric"
+          min={0}
+          type="number"
+          value={draftValue}
+          onChange={(event) => onDraftChange(event.target.value)}
+        />
+      ) : (
+        <strong>{formatValue(value)}</strong>
+      )}
     </div>
   );
 }
@@ -610,6 +886,23 @@ function formatPercent(value: number | null | undefined) {
   return value === null || value === undefined ? '-' : `${value}%`;
 }
 
+function getSafeSteamProfileUrl(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function getPlayerInitial(nickname: string): string {
+  return nickname.trim().slice(0, 1).toUpperCase() || '?';
+}
+
 function toDraftPlayers(players: PlayerStat[]): DraftPlayerStat[] {
   return players.map(toDraftPlayer);
 }
@@ -661,6 +954,46 @@ function parseDraftInteger(value: string): number | null {
 
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toDraftMapKey(match: MatchListItem): string {
+  if (match.mapKey) {
+    return match.mapKey;
+  }
+
+  return match.mapName ? PRESERVE_CURRENT_MAP_KEY : '';
+}
+
+function toDateTimeLocalValue(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join('-') + `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function getMatchOutcome(match: MatchListItem): MatchOutcome | null {
+  const team = match.players.find((player) => player.team === 'CT' || player.team === 'T')?.team;
+  if (!team || match.ctScore === null || match.tScore === null) {
+    return null;
+  }
+
+  const teamScore = team === 'CT' ? match.ctScore : match.tScore;
+  const opponentScore = team === 'CT' ? match.tScore : match.ctScore;
+
+  if (teamScore === opponentScore) {
+    return { label: 'Draw', status: 'draw' };
+  }
+
+  return teamScore > opponentScore
+    ? { label: 'Won', status: 'won' }
+    : { label: 'Lost', status: 'lost' };
 }
 
 function formatDate(value: string) {
